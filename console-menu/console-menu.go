@@ -14,6 +14,7 @@ import (
 	"github.com/letgo/cracker"
 	"github.com/letgo/curlparser"
 	"github.com/letgo/scanner"
+	"github.com/letgo/secretscanner"
 	"github.com/letgo/userlist"
 	"github.com/letgo/wordlist"
 )
@@ -35,10 +36,11 @@ func (m *Menu) Display() {
 	fmt.Println("===== Password Cracker Menu ======")
 	fmt.Println("1. Start Attack")
 	fmt.Println("2. Scan for Login Endpoints")
-	fmt.Println("3. Generate User List")
-	fmt.Println("4. Generate Password List")
-	fmt.Println("5. Attack with cURL Config")
-	fmt.Println("6. Exit")
+	fmt.Println("3. Scan for Secrets/Env/Tokens")
+	fmt.Println("4. Generate User List")
+	fmt.Println("5. Generate Password List")
+	fmt.Println("6. Attack with cURL Config")
+	fmt.Println("7. Exit")
 	fmt.Print("Choose an option: ")
 }
 
@@ -54,12 +56,14 @@ func (m *Menu) Process() bool {
 	case "2":
 		m.scanEndpoints()
 	case "3":
-		m.generateUserList()
+		m.scanSecrets()
 	case "4":
-		m.generatePasswordList()
+		m.generateUserList()
 	case "5":
-		m.attackWithCurl()
+		m.generatePasswordList()
 	case "6":
+		m.attackWithCurl()
+	case "7":
 		fmt.Println("Exiting...")
 		return false
 	default:
@@ -815,6 +819,265 @@ func (m *Menu) scanEndpoints() {
 	fmt.Println(strings.Repeat("=", 70))
 	fmt.Println("\nScan complete! Returning to main menu...")
 	fmt.Println()
+}
+
+// scanSecrets scans for exposed environment variables, tokens, and configuration data
+func (m *Menu) scanSecrets() {
+	reader := bufio.NewReader(os.Stdin)
+
+	fmt.Print("Enter Base URL (e.g., https://example.com): ")
+	baseURL, _ := reader.ReadString('\n')
+	baseURL = strings.TrimSpace(baseURL)
+
+	if baseURL == "" {
+		fmt.Println("Error: Base URL is required.")
+		return
+	}
+
+	// Parse URL to validate format
+	parsedURL, err := url.Parse(baseURL)
+	if err != nil {
+		fmt.Printf("Error: Invalid URL format: %v\n", err)
+		return
+	}
+
+	// Set default protocol if missing
+	if parsedURL.Scheme == "" {
+		parsedURL.Scheme = "https"
+		baseURL = parsedURL.String()
+	}
+
+	// Ask for thread count
+	fmt.Print("Enter number of threads for scanning (default: 10): ")
+	threadsStr, _ := reader.ReadString('\n')
+	threadsStr = strings.TrimSpace(threadsStr)
+	threads := 10
+	if threadsStr != "" {
+		if t, err := strconv.Atoi(threadsStr); err == nil && t > 0 {
+			threads = t
+		}
+	}
+
+	// Ask for timeout
+	fmt.Print("Enter timeout in seconds (default: 10): ")
+	timeoutStr, _ := reader.ReadString('\n')
+	timeoutStr = strings.TrimSpace(timeoutStr)
+	timeout := 10 * time.Second
+	if timeoutStr != "" {
+		if t, err := strconv.Atoi(timeoutStr); err == nil && t > 0 {
+			timeout = time.Duration(t) * time.Second
+		}
+	}
+
+	// Ask if should follow redirects
+	fmt.Print("Follow redirects? (y/n, default: y): ")
+	followRedirectsStr, _ := reader.ReadString('\n')
+	followRedirectsStr = strings.TrimSpace(strings.ToLower(followRedirectsStr))
+	followRedirects := followRedirectsStr != "n" && followRedirectsStr != "no"
+
+	// Create scanner config
+	scannerConfig := secretscanner.ScannerConfig{
+		BaseURL:         baseURL,
+		MaxThreads:      threads,
+		Timeout:          timeout,
+		FollowRedirects: followRedirects,
+	}
+
+	// Create and run scanner
+	fmt.Printf("\nScanning for exposed secrets on %s...\n", baseURL)
+	fmt.Println("This may take a few moments...\n")
+
+	scannerInstance := secretscanner.New(scannerConfig)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	results, err := scannerInstance.Scan(ctx)
+	if err != nil {
+		fmt.Printf("Error scanning for secrets: %v\n", err)
+		return
+	}
+
+	scanned := scannerInstance.GetStats()
+
+	// Display results
+	fmt.Println("\n" + strings.Repeat("=", 70))
+	fmt.Println("                    SECRET SCAN RESULTS")
+	fmt.Println(strings.Repeat("=", 70))
+	fmt.Printf("URLs Scanned: %d\n", scanned)
+	fmt.Printf("Secrets Found: %d\n", len(results))
+	fmt.Println(strings.Repeat("=", 70))
+
+	if len(results) == 0 {
+		fmt.Println("\n✓ No exposed secrets found.")
+		fmt.Println("  The application appears to be properly secured.")
+		fmt.Println()
+		return
+	}
+
+	// Group results by type and severity
+	resultsByType := make(map[string][]secretscanner.ScanResult)
+	resultsBySeverity := make(map[string][]secretscanner.ScanResult)
+
+	for _, result := range results {
+		resultsByType[result.Type] = append(resultsByType[result.Type], result)
+		resultsBySeverity[result.Severity] = append(resultsBySeverity[result.Severity], result)
+	}
+
+	// Display summary by severity
+	fmt.Println("\nSummary by Severity:")
+	fmt.Println(strings.Repeat("-", 70))
+	if high := resultsBySeverity["high"]; len(high) > 0 {
+		fmt.Printf("  [HIGH]   %d finding(s) - Immediate action required!\n", len(high))
+	}
+	if medium := resultsBySeverity["medium"]; len(medium) > 0 {
+		fmt.Printf("  [MEDIUM] %d finding(s) - Review recommended\n", len(medium))
+	}
+	if low := resultsBySeverity["low"]; len(low) > 0 {
+		fmt.Printf("  [LOW]    %d finding(s) - Monitor and review\n", len(low))
+	}
+
+	// Display summary by type
+	fmt.Println("\nSummary by Type:")
+	fmt.Println(strings.Repeat("-", 70))
+	for _, resultType := range []string{"env", "token", "api_key", "credential", "config"} {
+		if results := resultsByType[resultType]; len(results) > 0 {
+			fmt.Printf("  [%s] %d finding(s)\n", strings.ToUpper(resultType), len(results))
+		}
+	}
+
+	// Display detailed findings
+	fmt.Println("\n" + strings.Repeat("-", 70))
+	fmt.Println("DETAILED FINDINGS")
+	fmt.Println(strings.Repeat("-", 70))
+
+	// Display high severity first
+	if highResults := resultsBySeverity["high"]; len(highResults) > 0 {
+		fmt.Println("\n[!] HIGH SEVERITY FINDINGS:")
+		for i, result := range highResults {
+			fmt.Printf("\n  [%d] %s\n", i+1, result.URL)
+			fmt.Printf("      Type: %s | Severity: %s\n", strings.ToUpper(result.Type), strings.ToUpper(result.Severity))
+			fmt.Printf("      Location: %s\n", result.Location)
+			if result.FilePath != "" {
+				fmt.Printf("      File: %s\n", result.FilePath)
+			}
+			fmt.Printf("      Pattern: %s\n", result.Pattern)
+			if result.Value != "" {
+				fmt.Printf("      Value: %s\n", result.Value)
+			}
+			fmt.Printf("      Description: %s\n", result.Description)
+		}
+	}
+
+	// Display medium severity
+	if mediumResults := resultsBySeverity["medium"]; len(mediumResults) > 0 {
+		fmt.Println("\n[!] MEDIUM SEVERITY FINDINGS:")
+		for i, result := range mediumResults {
+			fmt.Printf("\n  [%d] %s\n", i+1, result.URL)
+			fmt.Printf("      Type: %s | Severity: %s\n", strings.ToUpper(result.Type), strings.ToUpper(result.Severity))
+			fmt.Printf("      Location: %s\n", result.Location)
+			if result.FilePath != "" {
+				fmt.Printf("      File: %s\n", result.FilePath)
+			}
+			fmt.Printf("      Pattern: %s\n", result.Pattern)
+			if result.Value != "" {
+				fmt.Printf("      Value: %s\n", result.Value)
+			}
+			fmt.Printf("      Description: %s\n", result.Description)
+		}
+	}
+
+	// Display low severity
+	if lowResults := resultsBySeverity["low"]; len(lowResults) > 0 {
+		fmt.Println("\n[!] LOW SEVERITY FINDINGS:")
+		for i, result := range lowResults {
+			fmt.Printf("\n  [%d] %s\n", i+1, result.URL)
+			fmt.Printf("      Type: %s | Severity: %s\n", strings.ToUpper(result.Type), strings.ToUpper(result.Severity))
+			fmt.Printf("      Location: %s\n", result.Location)
+			if result.FilePath != "" {
+				fmt.Printf("      File: %s\n", result.FilePath)
+			}
+			fmt.Printf("      Pattern: %s\n", result.Pattern)
+			if result.Value != "" {
+				fmt.Printf("      Value: %s\n", result.Value)
+			}
+			fmt.Printf("      Description: %s\n", result.Description)
+		}
+	}
+
+	// Ask if user wants to save results
+	fmt.Print("\nSave results to file? (y/n, default: y): ")
+	saveStr, _ := reader.ReadString('\n')
+	saveStr = strings.TrimSpace(strings.ToLower(saveStr))
+	if saveStr != "n" && saveStr != "no" {
+		if err := m.writeSecretResultsToFile(results); err != nil {
+			fmt.Printf("Warning: Failed to write results to file: %v\n", err)
+		} else {
+			fmt.Printf("✓ Results saved to secrets-found.txt\n")
+		}
+	}
+
+	fmt.Println(strings.Repeat("=", 70))
+	fmt.Println("\nScan complete! Returning to main menu...")
+	fmt.Println()
+}
+
+// writeSecretResultsToFile writes secret scan results to a file
+func (m *Menu) writeSecretResultsToFile(results []secretscanner.ScanResult) error {
+	file, err := os.Create("secrets-found.txt")
+	if err != nil {
+		return fmt.Errorf("failed to create file: %w", err)
+	}
+	defer file.Close()
+
+	writer := bufio.NewWriter(file)
+	defer writer.Flush()
+
+	// Write header
+	header := fmt.Sprintf("%s\n%s\n%s\n\n",
+		strings.Repeat("=", 70),
+		"SECRET SCAN RESULTS",
+		strings.Repeat("=", 70))
+	if _, err := writer.WriteString(header); err != nil {
+		return fmt.Errorf("failed to write header: %w", err)
+	}
+
+	// Group by severity
+	resultsBySeverity := make(map[string][]secretscanner.ScanResult)
+	for _, result := range results {
+		resultsBySeverity[result.Severity] = append(resultsBySeverity[result.Severity], result)
+	}
+
+	// Write results grouped by severity
+	for _, severity := range []string{"high", "medium", "low"} {
+		if severityResults := resultsBySeverity[severity]; len(severityResults) > 0 {
+			severityHeader := fmt.Sprintf("\n[%s] SEVERITY FINDINGS (%d):\n%s\n",
+				strings.ToUpper(severity), len(severityResults), strings.Repeat("-", 70))
+			if _, err := writer.WriteString(severityHeader); err != nil {
+				return fmt.Errorf("failed to write severity header: %w", err)
+			}
+
+			for i, result := range severityResults {
+				resultLine := fmt.Sprintf("\n[%d] %s\n", i+1, result.URL)
+				resultLine += fmt.Sprintf("    Type: %s | Severity: %s\n", strings.ToUpper(result.Type), strings.ToUpper(result.Severity))
+				resultLine += fmt.Sprintf("    Location: %s\n", result.Location)
+				if result.FilePath != "" {
+					resultLine += fmt.Sprintf("    File: %s\n", result.FilePath)
+				}
+				resultLine += fmt.Sprintf("    Pattern: %s\n", result.Pattern)
+				if result.Value != "" {
+					resultLine += fmt.Sprintf("    Value: %s\n", result.Value)
+				}
+				resultLine += fmt.Sprintf("    Description: %s\n", result.Description)
+				resultLine += "\n"
+
+				if _, err := writer.WriteString(resultLine); err != nil {
+					return fmt.Errorf("failed to write result: %w", err)
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 // writeValidEndpointsToFile writes valid endpoints to valid-url.txt

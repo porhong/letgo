@@ -22,6 +22,8 @@ go build -o letgo cmd/letgo/main.go
 ./letgo
 # or
 go run cmd/letgo/main.go
+# linux build
+$env:GOOS="linux"; $env:GOARCH="amd64"; go build -o letgo
 ```
 
 ## Usage

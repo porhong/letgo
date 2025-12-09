@@ -1,13 +1,27 @@
 package main
 
 import (
-	"fmt"
-	"os"
+	"time"
+
+	consolemenu "github.com/letgo/console-menu"
+	"github.com/letgo/cracker"
 )
 
 func main() {
-	// This is a placeholder main package.
-	// The actual application logic is in the cmd/letgo package.
-	fmt.Println("To run the application, use: go run cmd/letgo/main.go")
-	os.Exit(1)
+	config := cracker.AttackConfig{
+		MaxThreads:   10,
+		Protocol:     "http",
+		Port:         80,
+		Timeout:      5 * time.Second,
+		ShowAttempts: false,
+	}
+
+	menu := consolemenu.New(&config)
+
+	for {
+		menu.Display()
+		if !menu.Process() {
+			break
+		}
+	}
 }
