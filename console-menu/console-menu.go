@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/letgo/cracker"
+	"github.com/letgo/curlparser"
 	"github.com/letgo/scanner"
 	"github.com/letgo/userlist"
 	"github.com/letgo/wordlist"
@@ -36,7 +37,8 @@ func (m *Menu) Display() {
 	fmt.Println("2. Scan for Login Endpoints")
 	fmt.Println("3. Generate User List")
 	fmt.Println("4. Generate Password List")
-	fmt.Println("5. Exit")
+	fmt.Println("5. Attack with cURL Config")
+	fmt.Println("6. Exit")
 	fmt.Print("Choose an option: ")
 }
 
@@ -56,6 +58,8 @@ func (m *Menu) Process() bool {
 	case "4":
 		m.generatePasswordList()
 	case "5":
+		m.attackWithCurl()
+	case "6":
 		fmt.Println("Exiting...")
 		return false
 	default:
@@ -206,20 +210,34 @@ func (m *Menu) startAttack() {
 	// Get attack configuration
 	fmt.Println("\n===== Attack Configuration =====")
 	
-	fmt.Print("Enter Username: ")
-	username, _ := reader.ReadString('\n')
-	username = strings.TrimSpace(username)
-	if username == "" {
-		fmt.Println("Error: Username is required.")
-		return
+	// Ask if using userlist or single username
+	fmt.Print("Use userlist file? (y/n, default: n): ")
+	useUserlist, _ := reader.ReadString('\n')
+	useUserlist = strings.TrimSpace(strings.ToLower(useUserlist))
+	
+	var username, userlist string
+	if useUserlist == "y" || useUserlist == "yes" {
+		fmt.Print("Enter Userlist path (default: users.txt): ")
+		userlist, _ = reader.ReadString('\n')
+		userlist = strings.TrimSpace(userlist)
+		if userlist == "" {
+			userlist = "users.txt"
+		}
+	} else {
+		fmt.Print("Enter Username: ")
+		username, _ = reader.ReadString('\n')
+		username = strings.TrimSpace(username)
+		if username == "" {
+			fmt.Println("Error: Username is required.")
+			return
+		}
 	}
 
-	fmt.Print("Enter Wordlist path: ")
+	fmt.Print("Enter Wordlist path (default: passwords.txt): ")
 	wordlist, _ := reader.ReadString('\n')
 	wordlist = strings.TrimSpace(wordlist)
 	if wordlist == "" {
-		fmt.Println("Error: Wordlist path is required.")
-		return
+		wordlist = "passwords.txt"
 	}
 
 	fmt.Print("Enter Max Threads (default: 100): ")
@@ -372,6 +390,7 @@ func (m *Menu) startAttack() {
 		attackConfig := cracker.AttackConfig{
 			Target:          host,
 			Username:        username,
+			Userlist:        userlist,
 			Wordlist:        wordlist,
 			MaxThreads:      maxThreads,
 			Protocol:        protocol,
@@ -393,20 +412,57 @@ func (m *Menu) startAttack() {
 		// Create password cracker
 		pc := cracker.New(attackConfig)
 
+		// Load userlist
+		if err := pc.LoadUserlist(); err != nil {
+			fmt.Printf("  ✗ Error loading userlist: %v\n", err)
+			continue
+		}
+
 		// Load wordlist
 		if err := pc.LoadWordlist(); err != nil {
 			fmt.Printf("  ✗ Error loading wordlist: %v\n", err)
 			continue
 		}
 
-		// Start attack
+		// Calculate total combinations and warn if too large
+		totalUsers := len(pc.GetUserlist())
+		totalPasswords := len(pc.GetWordlist())
+		totalCombinations := totalUsers * totalPasswords
+		
 		fmt.Printf("  → Threads: %d, Timeout: %v\n", maxThreads, timeout)
-		found, password := pc.Start()
+		if userlist != "" {
+			fmt.Printf("  → Testing %d users with %d passwords (%d total combinations)\n", totalUsers, totalPasswords, totalCombinations)
+		} else {
+			fmt.Printf("  → Testing 1 user with %d passwords\n", totalPasswords)
+		}
+		
+		// Warn for large attacks
+		if totalCombinations > 100000 {
+			estimatedTime := float64(totalCombinations) / 1000.0 / 60.0 // Rough estimate at 1000/s
+			fmt.Printf("  ⚠ WARNING: Large attack size! Estimated time: %.1f minutes\n", estimatedTime)
+			fmt.Print("  Continue? (y/n): ")
+			confirm, _ := reader.ReadString('\n')
+			if strings.TrimSpace(strings.ToLower(confirm)) != "y" {
+				fmt.Println("  Attack cancelled.")
+				continue
+			}
+		}
+		
+		// Start attack
+		found, credentials := pc.Start()
 
 		if found {
-			fmt.Printf("  ✓ Password found: %s\n", password)
+			fmt.Printf("  ✓ Credentials found: %s\n", credentials)
+			// Parse username:password
+			parts := strings.SplitN(credentials, ":", 2)
+			foundUsername := username
+			foundPassword := credentials
+			if len(parts) == 2 {
+				foundUsername = parts[0]
+				foundPassword = parts[1]
+			}
 			// Write result to file
-			if err := m.writeResult(urlStr, username, password); err != nil {
+			if err := m.writeResult(urlStr, foundUsername, foundPassword); err != nil {
 				fmt.Printf("  ⚠ Warning: Failed to write result to file: %v\n", err)
 			} else {
 				fmt.Printf("  ✓ Result saved to results.txt\n")
@@ -533,11 +589,25 @@ func (m *Menu) scanEndpoints() {
 		}
 	}
 
+	// Ask for target technology (optional filtering)
+	fmt.Print("\nFilter by technology? (php/java/python/node/dotnet or Enter for auto-detect): ")
+	techFilter, _ := reader.ReadString('\n')
+	techFilter = strings.TrimSpace(strings.ToLower(techFilter))
+	
+	var targetLanguages []string
+	if techFilter != "" {
+		targetLanguages = []string{techFilter}
+		fmt.Printf("✓ Will filter results for %s technology\n", strings.ToUpper(techFilter))
+	} else {
+		fmt.Println("✓ Auto-detect mode: will scan all technologies")
+	}
+
 	// Create scanner config
 	scannerConfig := scanner.ScannerConfig{
-		BaseURL:    baseURL,
-		MaxThreads: threads,
-		Timeout:    10 * time.Second,
+		BaseURL:         baseURL,
+		MaxThreads:      threads,
+		Timeout:         10 * time.Second,
+		TargetLanguages: targetLanguages,
 	}
 
 	// Create and run scanner
@@ -565,6 +635,14 @@ func (m *Menu) scanEndpoints() {
 
 	discovered, validated := scannerInstance.GetStats()
 	
+	// Analyze detected technologies
+	techStats := make(map[string]int)
+	for _, result := range results {
+		if result.DetectedLanguage != "" && result.DetectedLanguage != "unknown" {
+			techStats[result.DetectedLanguage]++
+		}
+	}
+	
 	// Clear display with summary
 	fmt.Println("\n" + strings.Repeat("=", 70))
 	fmt.Println("                    SCAN RESULTS")
@@ -572,6 +650,15 @@ func (m *Menu) scanEndpoints() {
 	fmt.Printf("Total Endpoints Scanned: %d\n", discovered)
 	fmt.Printf("Endpoints Validated: %d\n", validated)
 	fmt.Printf("Valid Login Endpoints Found: %d\n", len(results))
+	
+	// Display detected technologies
+	if len(techStats) > 0 {
+		fmt.Println("\nDetected Technologies:")
+		for tech, count := range techStats {
+			fmt.Printf("  • %s: %d endpoint(s)\n", strings.ToUpper(tech), count)
+			fmt.Printf("    ℹ %s\n", getTechnologyRecommendations(tech))
+		}
+	}
 	fmt.Println(strings.Repeat("=", 70))
 
 	if len(results) == 0 {
@@ -616,6 +703,13 @@ func (m *Menu) scanEndpoints() {
 			fmt.Printf("  [%d] %s\n", i+1, result.URL)
 			fmt.Printf("      Method: %-6s | Status: %s %-3d | Type: Login Form\n", 
 				result.Method, statusColor, result.StatusCode)
+			if result.DetectedLanguage != "" && result.DetectedLanguage != "unknown" {
+				techInfo := strings.ToUpper(result.DetectedLanguage)
+				if result.IsSSR {
+					techInfo += " (SSR)"
+				}
+				fmt.Printf("      Technology: %s\n", techInfo)
+			}
 			if result.ContentType != "" {
 				fmt.Printf("      Content-Type: %s\n", result.ContentType)
 			}
@@ -639,6 +733,13 @@ func (m *Menu) scanEndpoints() {
 			fmt.Printf("  [%d] %s\n", len(loginForms)+i+1, result.URL)
 			fmt.Printf("      Method: %-6s | Status: %s %-3d | Type: Login Page\n", 
 				result.Method, statusColor, result.StatusCode)
+			if result.DetectedLanguage != "" && result.DetectedLanguage != "unknown" {
+				techInfo := strings.ToUpper(result.DetectedLanguage)
+				if result.IsSSR {
+					techInfo += " (SSR)"
+				}
+				fmt.Printf("      Technology: %s\n", techInfo)
+			}
 			if result.ContentType != "" {
 				fmt.Printf("      Content-Type: %s\n", result.ContentType)
 			}
@@ -662,6 +763,13 @@ func (m *Menu) scanEndpoints() {
 			fmt.Printf("  [%d] %s\n", len(loginForms)+len(loginPages)+i+1, result.URL)
 			fmt.Printf("      Method: %-6s | Status: %s %-3d\n", 
 				result.Method, statusColor, result.StatusCode)
+			if result.DetectedLanguage != "" && result.DetectedLanguage != "unknown" {
+				techInfo := strings.ToUpper(result.DetectedLanguage)
+				if result.IsSSR {
+					techInfo += " (SSR)"
+				}
+				fmt.Printf("      Technology: %s\n", techInfo)
+			}
 			if result.ContentType != "" {
 				fmt.Printf("      Content-Type: %s\n", result.ContentType)
 			}
@@ -671,6 +779,29 @@ func (m *Menu) scanEndpoints() {
 
 	// Store discovered endpoints
 	m.DiscoveredEndpoints = results
+
+	// Ask user if they want to filter by technology
+	if len(techStats) > 1 {
+		fmt.Println("\nWould you like to filter endpoints by technology?")
+		fmt.Print("Enter technology to filter (or press Enter to keep all): ")
+		filterInput, _ := reader.ReadString('\n')
+		filterInput = strings.TrimSpace(strings.ToLower(filterInput))
+		
+		if filterInput != "" {
+			filteredResults := []scanner.EndpointResult{}
+			for _, result := range results {
+				if strings.EqualFold(result.DetectedLanguage, filterInput) {
+					filteredResults = append(filteredResults, result)
+				}
+			}
+			if len(filteredResults) > 0 {
+				results = filteredResults
+				fmt.Printf("✓ Filtered to %d endpoint(s) with %s technology\n", len(results), strings.ToUpper(filterInput))
+			} else {
+				fmt.Printf("⚠ No endpoints found with %s technology, keeping all results\n", strings.ToUpper(filterInput))
+			}
+		}
+	}
 
 	// Write valid endpoints to file
 	if len(results) > 0 {
@@ -705,4 +836,299 @@ func (m *Menu) writeValidEndpointsToFile(results []scanner.EndpointResult) error
 	}
 
 	return nil
+}
+
+// getTechnologyRecommendations returns attack strategy recommendations based on detected technology
+func getTechnologyRecommendations(tech string) string {
+	recommendations := map[string]string{
+		"php":     "Common endpoints: /login.php, /admin.php | Default form fields: username, password",
+		"java":    "Common endpoints: /j_security_check, /login.do | Watch for session tokens",
+		"python":  "Django/Flask detected | Look for csrfmiddlewaretoken in forms",
+		"dotnet":  "ASP.NET detected | Common endpoints: /Account/Login.aspx | Check for ViewState",
+		"nextjs":  "Next.js (SSR) detected | API routes at /api/auth/* | May use JSON authentication",
+		"nuxtjs":  "Nuxt.js (SSR) detected | API routes at /api/* | May use JSON authentication",
+		"angular": "Angular (SPA) detected | Likely uses REST API | Check /api/login endpoints",
+		"react":   "React (SPA) detected | Likely uses REST API | Check /api/auth endpoints",
+		"vue":     "Vue.js detected | Likely uses REST API | Check /api/login endpoints",
+		"node":    "Node.js/Express detected | Check for express session cookies",
+		"ruby":    "Ruby on Rails detected | CSRF token required | Check /users/sign_in",
+	}
+	
+	if rec, ok := recommendations[strings.ToLower(tech)]; ok {
+		return rec
+	}
+	return "No specific recommendations available"
+}
+
+// attackWithCurl performs an attack using cURL configuration from a file
+func (m *Menu) attackWithCurl() {
+	reader := bufio.NewReader(os.Stdin)
+
+	// Ask for cURL file path
+	fmt.Print("\nEnter cURL config file path (default: cURL.txt): ")
+	curlFile, _ := reader.ReadString('\n')
+	curlFile = strings.TrimSpace(curlFile)
+	if curlFile == "" {
+		curlFile = "cURL.txt"
+	}
+
+	// Load cURL configurations from file
+	curlConfigs, err := curlparser.LoadFromFile(curlFile)
+	if err != nil {
+		fmt.Printf("Error loading cURL config: %v\n", err)
+		fmt.Println("Please make sure the file exists and contains valid cURL commands.")
+		fmt.Println("\nExample cURL.txt format:")
+		fmt.Println("  curl -X POST https://example.com/login \\")
+		fmt.Println("    -H 'Content-Type: application/json' \\")
+		fmt.Println("    -d '{\"username\":\"test\",\"password\":\"test\"}'")
+		fmt.Println()
+		return
+	}
+
+	fmt.Printf("\n✓ Found %d cURL configuration(s)\n\n", len(curlConfigs))
+
+	// Display found configurations
+	fmt.Println("===== Found cURL Configurations =====")
+	for i, config := range curlConfigs {
+		fmt.Printf("[%d] %s %s\n", i+1, config.Method, config.URL)
+		if config.ContentType != "" {
+			fmt.Printf("    Content-Type: %s\n", config.ContentType)
+		}
+		if len(config.Headers) > 0 {
+			fmt.Printf("    Headers: %d custom header(s)\n", len(config.Headers))
+		}
+		if config.Data != "" {
+			// Extract field names
+			usernameField, passwordField, fields := curlparser.ExtractFieldsFromData(config.Data, config.ContentType)
+			fmt.Printf("    Detected fields: username='%s', password='%s'\n", usernameField, passwordField)
+			if len(fields) > 2 {
+				fmt.Printf("    Additional fields: %d\n", len(fields)-2)
+			}
+		}
+		fmt.Println()
+	}
+
+	// Ask which config to use
+	var selectedConfigs []*curlparser.CurlConfig
+	if len(curlConfigs) == 1 {
+		selectedConfigs = curlConfigs
+		fmt.Println("Using the only available cURL configuration.")
+	} else {
+		fmt.Print("Choose option:\n")
+		fmt.Print("  [1] Select specific configuration\n")
+		fmt.Print("  [2] Use all configurations\n")
+		fmt.Print("Enter choice (1 or 2): ")
+		choice, _ := reader.ReadString('\n')
+		choice = strings.TrimSpace(choice)
+
+		if choice == "1" {
+			fmt.Print("Enter configuration number: ")
+			numStr, _ := reader.ReadString('\n')
+			num, err := strconv.Atoi(strings.TrimSpace(numStr))
+			if err != nil || num < 1 || num > len(curlConfigs) {
+				fmt.Println("Invalid configuration number.")
+				return
+			}
+			selectedConfigs = []*curlparser.CurlConfig{curlConfigs[num-1]}
+		} else if choice == "2" {
+			selectedConfigs = curlConfigs
+		} else {
+			fmt.Println("Invalid choice.")
+			return
+		}
+	}
+
+	// Get common attack parameters
+	fmt.Println("\n===== Attack Configuration =====")
+	
+	// Ask if using userlist or single username
+	fmt.Print("Use userlist file? (y/n, default: n): ")
+	useUserlist, _ := reader.ReadString('\n')
+	useUserlist = strings.TrimSpace(strings.ToLower(useUserlist))
+	
+	var username, userlist string
+	if useUserlist == "y" || useUserlist == "yes" {
+		fmt.Print("Enter Userlist path (default: users.txt): ")
+		userlist, _ = reader.ReadString('\n')
+		userlist = strings.TrimSpace(userlist)
+		if userlist == "" {
+			userlist = "users.txt"
+		}
+	} else {
+		fmt.Print("Enter Username: ")
+		username, _ = reader.ReadString('\n')
+		username = strings.TrimSpace(username)
+		if username == "" {
+			fmt.Println("Error: Username is required.")
+			return
+		}
+	}
+
+	fmt.Print("Enter Wordlist path (default: passwords.txt): ")
+	wordlist, _ := reader.ReadString('\n')
+	wordlist = strings.TrimSpace(wordlist)
+	if wordlist == "" {
+		wordlist = "passwords.txt"
+	}
+
+	fmt.Print("Enter Max Threads (default: 100): ")
+	threadsStr, _ := reader.ReadString('\n')
+	threadsStr = strings.TrimSpace(threadsStr)
+	maxThreads := 100
+	if threadsStr != "" {
+		if t, err := strconv.Atoi(threadsStr); err == nil && t > 0 {
+			maxThreads = t
+		}
+	}
+
+	// Optional: Override success/failure detection
+	fmt.Print("\nEnter Success HTTP codes (comma-separated, or press Enter for auto-detect): ")
+	successCodesStr, _ := reader.ReadString('\n')
+	successCodesStr = strings.TrimSpace(successCodesStr)
+	var successCodes []int
+	if successCodesStr != "" {
+		codes := strings.Split(successCodesStr, ",")
+		for _, codeStr := range codes {
+			if code, err := strconv.Atoi(strings.TrimSpace(codeStr)); err == nil {
+				successCodes = append(successCodes, code)
+			}
+		}
+	}
+
+	fmt.Print("Enter Success keywords in response (comma-separated, or press Enter to skip): ")
+	successKeywordsStr, _ := reader.ReadString('\n')
+	successKeywordsStr = strings.TrimSpace(successKeywordsStr)
+	var successKeywords []string
+	if successKeywordsStr != "" {
+		successKeywords = strings.Split(successKeywordsStr, ",")
+		for i := range successKeywords {
+			successKeywords[i] = strings.TrimSpace(successKeywords[i])
+		}
+	}
+
+	fmt.Print("Enter Failure keywords in response (comma-separated, or press Enter to skip): ")
+	failureKeywordsStr, _ := reader.ReadString('\n')
+	failureKeywordsStr = strings.TrimSpace(failureKeywordsStr)
+	var failureKeywords []string
+	if failureKeywordsStr != "" {
+		failureKeywords = strings.Split(failureKeywordsStr, ",")
+		for i := range failureKeywords {
+			failureKeywords[i] = strings.TrimSpace(failureKeywords[i])
+		}
+	}
+
+	// Start attacks
+	fmt.Println("\n===== Starting Attacks =====")
+	successCount := 0
+	totalConfigs := len(selectedConfigs)
+
+	for i, curlConfig := range selectedConfigs {
+		fmt.Printf("\n[%d/%d] Attacking: %s %s\n", i+1, totalConfigs, curlConfig.Method, curlConfig.URL)
+
+		// Convert cURL config to attack config
+		attackConfig, err := curlConfig.ToAttackConfig()
+		if err != nil {
+			fmt.Printf("  ✗ Error converting config: %v\n", err)
+			continue
+		}
+
+		// Apply user-provided parameters
+		attackConfig.Username = username
+		attackConfig.Userlist = userlist
+		attackConfig.Wordlist = wordlist
+		attackConfig.MaxThreads = maxThreads
+		attackConfig.ShowAttempts = false
+		
+		if len(successCodes) > 0 {
+			attackConfig.SuccessCodes = successCodes
+		}
+		if len(successKeywords) > 0 {
+			attackConfig.SuccessKeywords = successKeywords
+		}
+		if len(failureKeywords) > 0 {
+			attackConfig.FailureKeywords = failureKeywords
+		}
+
+		// Display configuration details
+		fmt.Printf("  → Endpoint: %s\n", attackConfig.Endpoint)
+		fmt.Printf("  → Method: %s\n", attackConfig.Method)
+		fmt.Printf("  → Content-Type: %s\n", attackConfig.ContentType)
+		fmt.Printf("  → Username field: %s\n", attackConfig.UsernameField)
+		fmt.Printf("  → Password field: %s\n", attackConfig.PasswordField)
+		fmt.Printf("  → Threads: %d, Timeout: %v\n", maxThreads, attackConfig.Timeout)
+		if len(attackConfig.CustomHeaders) > 0 {
+			fmt.Printf("  → Custom headers: %d\n", len(attackConfig.CustomHeaders))
+		}
+
+		// Create password cracker
+		pc := cracker.New(*attackConfig)
+
+		// Load userlist
+		if err := pc.LoadUserlist(); err != nil {
+			fmt.Printf("  ✗ Error loading userlist: %v\n", err)
+			continue
+		}
+
+		// Load wordlist
+		if err := pc.LoadWordlist(); err != nil {
+			fmt.Printf("  ✗ Error loading wordlist: %v\n", err)
+			continue
+		}
+
+		// Calculate total combinations and warn if too large
+		totalUsers := len(pc.GetUserlist())
+		totalPasswords := len(pc.GetWordlist())
+		totalCombinations := totalUsers * totalPasswords
+		
+		if userlist != "" {
+			fmt.Printf("  → Testing %d users with %d passwords (%d total combinations)\n", totalUsers, totalPasswords, totalCombinations)
+		} else {
+			fmt.Printf("  → Testing 1 user with %d passwords\n", totalPasswords)
+		}
+		
+		// Warn for large attacks
+		if totalCombinations > 100000 {
+			estimatedTime := float64(totalCombinations) / 1000.0 / 60.0 // Rough estimate at 1000/s
+			fmt.Printf("  ⚠ WARNING: Large attack size! Estimated time: %.1f minutes\n", estimatedTime)
+			fmt.Print("  Continue? (y/n): ")
+			confirm, _ := reader.ReadString('\n')
+			if strings.TrimSpace(strings.ToLower(confirm)) != "y" {
+				fmt.Println("  Attack cancelled.")
+				continue
+			}
+		}
+
+		// Start attack
+		found, credentials := pc.Start()
+
+		if found {
+			fmt.Printf("  ✓ Credentials found: %s\n", credentials)
+			// Parse username:password
+			parts := strings.SplitN(credentials, ":", 2)
+			foundUsername := username
+			foundPassword := credentials
+			if len(parts) == 2 {
+				foundUsername = parts[0]
+				foundPassword = parts[1]
+			}
+			// Write result to file
+			if err := m.writeResult(curlConfig.URL, foundUsername, foundPassword); err != nil {
+				fmt.Printf("  ⚠ Warning: Failed to write result to file: %v\n", err)
+			} else {
+				fmt.Printf("  ✓ Result saved to results.txt\n")
+			}
+			successCount++
+		} else {
+			fmt.Printf("  ✗ Password not found.\n")
+		}
+	}
+
+	// Summary
+	fmt.Println("\n===== Attack Summary =====")
+	fmt.Printf("Total configurations attacked: %d\n", totalConfigs)
+	fmt.Printf("Successful credentials found: %d\n", successCount)
+	if successCount > 0 {
+		fmt.Printf("Results saved to results.txt\n")
+	}
+	fmt.Println()
 }

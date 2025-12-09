@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,24 +18,31 @@ type ProgressCallback func(scanned, total int, percentage float64)
 
 // ScannerConfig holds configuration for endpoint scanning
 type ScannerConfig struct {
-	BaseURL       string
-	MaxThreads    int
-	Timeout       time.Duration
-	UserAgent     string
-	CustomHeaders map[string]string
-	OnProgress    ProgressCallback // Optional callback for progress updates
+	BaseURL        string
+	MaxThreads     int
+	Timeout        time.Duration
+	UserAgent      string
+	CustomHeaders  map[string]string
+	OnProgress     ProgressCallback // Optional callback for progress updates
+	TargetLanguages []string         // Optional: filter endpoints by language/framework (e.g., "php", "java", "python", "node", "dotnet")
 }
 
 // EndpointResult represents a discovered endpoint
 type EndpointResult struct {
-	URL           string
-	Method        string
-	StatusCode    int
-	IsLoginPage   bool
-	HasLoginForm  bool
-	ResponseBody  string
-	ContentType   string
-	ContentLength int
+	URL              string
+	Method           string
+	StatusCode       int
+	IsLoginPage      bool
+	HasLoginForm     bool
+	ResponseBody     string
+	ContentType      string
+	ContentLength    int
+	DetectedLanguage string  // Detected language/framework (php, java, python, node, dotnet, etc.)
+	IsSSR            bool    // Whether this appears to be a Server-Side Rendered page
+	Is404            bool    // Whether this is detected as a 404 page despite 200 status
+	IsError          bool    // Whether this endpoint returned an error response (400, 500, or error content)
+	ErrorType        string  // Type of error detected (e.g., "404", "403", "500", "invalid", "redirect")
+	ConfidenceScore  float64 // Confidence score (0-100) indicating likelihood this is a valid login endpoint
 }
 
 // Scanner handles endpoint discovery
@@ -48,556 +56,163 @@ type Scanner struct {
 	total      int   // Total endpoints to scan
 }
 
-// Common login/auth endpoint patterns
+// Common login/auth endpoint patterns (streamlined for high accuracy)
 var commonEndpoints = []string{
-	// Basic login patterns
+	// Core login patterns (highest probability)
 	"/login",
 	"/signin",
 	"/sign-in",
-	"/sign_in",
-	"/log-in",
-	"/log_in",
 	"/auth",
 	"/authenticate",
-	"/authentication",
-	"/authorize",
-	"/authorization",
 
 	// Account/User login patterns
 	"/account/login",
-	"/account/signin",
-	"/account/auth",
 	"/user/login",
-	"/user/signin",
-	"/user/auth",
 	"/users/login",
-	"/users/signin",
-	"/member/login",
-	"/members/login",
-	"/customer/login",
-	"/customers/login",
+	"/users/sign_in",
 
 	// Admin login patterns
 	"/admin",
 	"/admin/login",
-	"/admin/signin",
-	"/admin/auth",
-	"/admin/authenticate",
 	"/administrator",
 	"/administrator/login",
-	"/administrator/signin",
-	"/adm",
-	"/adm/login",
-	"/management",
-	"/management/login",
-	"/manager",
-	"/manager/login",
 
 	// WordPress
 	"/wp-login.php",
 	"/wp-admin",
-	"/wp-admin/login.php",
-	"/wordpress/wp-login.php",
-	"/blog/wp-login.php",
-	"/wp/wp-login.php",
 
 	// Drupal
 	"/user/login",
 	"/user",
-	"/?q=user/login",
 
 	// Joomla
-	"/administrator",
 	"/administrator/index.php",
-	"/index.php/administrator",
-
-	// Magento
-	"/admin",
-	"/admin/index",
-	"/customer/account/login",
 
 	// Laravel
-	"/login",
-	"/admin/login",
 	"/auth/login",
 
 	// Django
 	"/accounts/login",
 	"/admin/login",
-	"/login/",
 
-	// Rails
-	"/users/sign_in",
-	"/users/sign_in",
-	"/admin/login",
-
-	// Spring Boot
-	"/login",
-	"/auth/login",
+	// Spring Boot / Java
 	"/api/auth/login",
 
 	// Dashboard/Portal patterns
 	"/dashboard",
 	"/dashboard/login",
-	"/dashboard/signin",
-	"/dashboard/auth",
 	"/portal",
 	"/portal/login",
-	"/portal/signin",
-	"/portal/auth",
 	"/console",
 	"/console/login",
-	"/console/signin",
-	"/console/auth",
-	"/panel",
-	"/panel/login",
-	"/panel/signin",
-	"/panel/auth",
-	"/control",
-	"/control/login",
-	"/control-panel",
-	"/control-panel/login",
 
-	// API endpoints
+	// API endpoints (most common versions)
 	"/api/login",
 	"/api/auth",
-	"/api/authenticate",
-	"/api/authorize",
-	"/api/signin",
 	"/api/v1/login",
 	"/api/v1/auth",
-	"/api/v1/authenticate",
-	"/api/v1/authorize",
-	"/api/v1/signin",
-	"/api/v2/login",
 	"/api/v2/auth",
-	"/api/v2/authenticate",
-	"/api/v2/authorize",
-	"/api/v2/signin",
-	"/api/v3/login",
-	"/api/v3/auth",
-	"/api/v3/authenticate",
-	"/rest/api/login",
 	"/rest/api/auth",
-	"/rest/v1/login",
-	"/rest/v1/auth",
-	"/rest/v2/login",
-	"/rest/v2/auth",
 
 	// OAuth/OAuth2 patterns
-	"/oauth",
 	"/oauth/authorize",
-	"/oauth/token",
-	"/oauth/login",
-	"/oauth/auth",
-	"/oauth2",
 	"/oauth2/authorize",
-	"/oauth2/token",
-	"/oauth2/login",
 	"/oauth2/auth",
-	"/oauth2/v2/authorize",
-	"/oauth2/v2/token",
 
 	// SSO patterns
 	"/sso",
 	"/sso/login",
-	"/sso/signin",
-	"/sso/auth",
-	"/sso/authenticate",
 	"/saml/login",
-	"/saml/sso",
-	"/saml2/login",
-	"/saml2/sso",
 	"/cas/login",
-	"/cas/authenticate",
 
-	// Application/Web patterns
-	"/app",
-	"/app/login",
-	"/app/signin",
-	"/app/auth",
-	"/web",
-	"/web/login",
-	"/web/signin",
-	"/web/auth",
-	"/service",
-	"/service/login",
-	"/service/signin",
-	"/service/auth",
-	"/secure",
-	"/secure/login",
-	"/secure/signin",
-	"/secure/auth",
-	"/system",
-	"/system/login",
-	"/system/signin",
-	"/system/auth",
-	"/site",
-	"/site/login",
-	"/site/signin",
-	"/site/auth",
-	"/main",
-	"/main/login",
-	"/main/signin",
-
-	// Versioned endpoints
-	"/v1/login",
-	"/v1/auth",
-	"/v1/authenticate",
-	"/v1/signin",
-	"/v2/login",
-	"/v2/auth",
-	"/v2/authenticate",
-	"/v2/signin",
-	"/v3/login",
-	"/v3/auth",
-	"/v3/authenticate",
-	"/v3/signin",
-
-	// File extension patterns
+	// File extension patterns (common only)
 	"/login.php",
-	"/login.html",
 	"/login.jsp",
 	"/login.aspx",
-	"/login.cfm",
-	"/login.do",
-	"/login.action",
-	"/signin.php",
-	"/signin.html",
-	"/signin.jsp",
-	"/signin.aspx",
+	"/login.html",
 	"/auth.php",
-	"/auth.html",
-	"/auth.jsp",
-	"/auth.aspx",
-	"/authenticate.php",
-	"/authenticate.html",
-	"/authenticate.jsp",
+	"/signin.php",
 
-	// Index-based patterns
-	"/index.php/login",
-	"/index.html/login",
-	"/index.jsp/login",
-	"/index.aspx/login",
-	"/index.php/auth",
-	"/index.html/auth",
-	"/index.jsp/auth",
-
-	// Control panels
+	// Control panels - cPanel
 	"/cpanel",
-	"/cpanel/login",
+	"/cpanel/",
+	"/login/?login_only=1",
+
+	// Control panels - WHM (WebHost Manager)
 	"/whm",
-	"/whm/login",
+	"/whm/",
+
+	// Control panels - Plesk
 	"/plesk",
-	"/plesk/login",
+	"/login_up.php",
+
+	// Control panels - DirectAdmin
 	"/directadmin",
-	"/directadmin/login",
+	"/CMD_LOGIN",
+
+	// Control panels - Webmin
 	"/webmin",
-	"/webmin/login",
+	"/session_login.cgi",
+
+	// Control panels - ISPConfig/CWP
+	"/login/index.php",
+
+	// Control panels - VestaCP
+	"/login/",
 
 	// Database admin panels
 	"/phpmyadmin",
 	"/phpMyAdmin",
 	"/pma",
-	"/mysql",
-	"/mysql/login",
-	"/adminer",
 	"/adminer.php",
+	"/adminer",
+	"/mysql",
+	"/db",
 	"/dbadmin",
-	"/db-admin",
 
 	// Application servers
-	"/manager",
 	"/manager/html",
-	"/manager/html/login",
 	"/tomcat/manager",
-	"/tomcat/manager/html",
-	"/tomcat/manager/html/login",
-	"/jboss",
-	"/jboss/login",
-	"/weblogic",
-	"/weblogic/login",
-	"/websphere",
-	"/websphere/login",
 
-	// CI/CD and DevOps tools
-	"/jenkins",
+	// CI/CD and DevOps tools (most popular)
 	"/jenkins/login",
-	"/jenkins/j_acegi_security_check",
-	"/gitlab",
 	"/gitlab/users/sign_in",
-	"/gitlab/login",
-	"/bitbucket",
-	"/bitbucket/login",
-	"/jira",
-	"/jira/login",
-	"/confluence",
-	"/confluence/login",
-	"/sonarqube",
-	"/sonarqube/login",
-	"/nexus",
-	"/nexus/login",
-	"/artifactory",
-	"/artifactory/login",
-
-	// Monitoring and analytics
-	"/grafana",
 	"/grafana/login",
-	"/kibana",
 	"/kibana/login",
-	"/elastic",
-	"/elastic/login",
-	"/prometheus",
-	"/prometheus/login",
-	"/zabbix",
-	"/zabbix/login",
-	"/nagios",
-	"/nagios/login",
-	"/cacti",
-	"/cacti/login",
-
-	// Cloud services
-	"/aws",
-	"/aws/login",
-	"/azure",
-	"/azure/login",
-	"/gcp",
-	"/gcp/login",
-	"/cloud",
-	"/cloud/login",
 
 	// Enterprise software
-	"/sharepoint",
-	"/sharepoint/login",
-	"/exchange",
-	"/exchange/login",
-	"/owa",
 	"/owa/auth/logon.aspx",
-	"/citrix",
-	"/citrix/login",
-	"/vmware",
-	"/vmware/login",
-	"/vcenter",
-	"/vcenter/login",
-
-	// Development tools
-	"/phpinfo.php",
-	"/info.php",
-	"/test.php",
-	"/debug",
-	"/debug/login",
-
-	// Mobile/API specific
-	"/mobile/login",
-	"/mobile/auth",
-	"/mobile/api/login",
-	"/app/api/login",
-	"/app/api/auth",
-
-	// Additional variations
-	"/sign-up",
-	"/signup",
-	"/register",
-	"/registration",
-	"/join",
-	"/enter",
-	"/access",
-	"/entry",
-	"/gateway",
-	"/gateway/login",
-	"/hub",
-	"/hub/login",
-	"/center",
-	"/center/login",
-	"/home/login",
-	"/welcome/login",
-	"/start/login",
-	"/begin/login",
-
-	// International variations
-	"/connexion",
-	"/anmelden",
-	"/acceder",
-	"/entrar",
-	"/ingresar",
-	"/acesso",
-	"/prijava",
-	"/giriş",
-	"/ログイン",
-	"/登录",
-	"/登入",
 }
 
-// Common subdomain patterns for scanning
+// Compiled regex patterns for better form detection
+var (
+	passwordFieldRegex = regexp.MustCompile(`<input[^>]*type=["']password["'][^>]*>`)
+	usernameFieldRegex = regexp.MustCompile(`<input[^>]*(?:name|id)=["'](?:username|user|email|login|account)["'][^>]*>`)
+	formTagRegex       = regexp.MustCompile(`<form[^>]*>`)
+	loginButtonRegex   = regexp.MustCompile(`<(?:button|input)[^>]*(?:type=["']submit["']|value=["'](?:log\s*in|sign\s*in|login|signin)["'])[^>]*>`)
+)
+
+// Control panel ports to scan (panel_name: ports)
+var controlPanelPorts = map[string][]string{
+	"cpanel":      {"2082", "2083"},
+	"whm":         {"2086", "2087"},
+	"plesk":       {"8443"},
+	"directadmin": {"2222"},
+	"webmin":      {"10000"},
+	"ispconfig":   {"8080", "8081"},
+	"cwp":         {"2030", "2031"},
+	"vestacp":     {"8083"},
+}
+
+// Common subdomain patterns for scanning (optimized for high-value targets)
 var commonSubdomains = []string{
-	"www",
 	"admin",
-	"administrator",
-	"adm",
 	"cpanel",
-	"cp",
 	"panel",
-	"control",
-	"dashboard",
-	"portal",
 	"login",
 	"auth",
-	"authenticate",
-	"signin",
+	"portal",
 	"api",
-	"api1",
-	"api2",
-	"v1",
-	"v2",
-	"v3",
-	"secure",
-	"secure1",
-	"secure2",
-	"ssl",
-	"mail",
-	"email",
-	"webmail",
-	"owa",
-	"exchange",
-	"sharepoint",
-	"dev",
-	"development",
-	"test",
-	"testing",
-	"staging",
-	"stage",
-	"prod",
-	"production",
-	"app",
-	"apps",
-	"application",
-	"web",
-	"www2",
-	"www3",
-	"blog",
-	"blogs",
-	"forum",
-	"forums",
-	"shop",
-	"store",
-	"ecommerce",
-	"payment",
-	"payments",
-	"billing",
-	"account",
-	"accounts",
-	"user",
-	"users",
-	"member",
-	"members",
-	"customer",
-	"customers",
-	"client",
-	"clients",
-	"support",
-	"help",
-	"docs",
-	"documentation",
-	"wiki",
-	"kb",
-	"knowledgebase",
-	"status",
-	"monitor",
-	"monitoring",
-	"grafana",
-	"kibana",
-	"jenkins",
-	"gitlab",
-	"bitbucket",
-	"jira",
-	"confluence",
-	"sonarqube",
-	"nexus",
-	"artifactory",
-	"phpmyadmin",
-	"pma",
-	"mysql",
-	"db",
-	"database",
-	"redis",
-	"elastic",
-	"elasticsearch",
-	"prometheus",
-	"zabbix",
-	"nagios",
-	"cacti",
-	"vmware",
-	"vcenter",
-	"citrix",
-	"aws",
-	"azure",
-	"gcp",
-	"cloud",
-	"cdn",
-	"static",
-	"assets",
-	"media",
-	"images",
-	"img",
-	"files",
-	"file",
-	"upload",
-	"download",
-	"downloads",
-	"ftp",
-	"sftp",
-	"smtp",
-	"imap",
-	"pop",
-	"pop3",
-	"ldap",
-	"ad",
-	"active-directory",
-	"adfs",
-	"okta",
-	"auth0",
-	"sso",
-	"saml",
-	"oauth",
-	"oauth2",
-	"m",
-	"mobile",
-	"mob",
-	"wap",
-	"i",
-	"iphone",
-	"android",
-	"ios",
-	"old",
-	"new",
-	"backup",
-	"backups",
-	"archive",
-	"archives",
-	"legacy",
-	"beta",
-	"alpha",
-	"demo",
-	"demos",
-	"sample",
-	"samples",
-	"example",
-	"examples",
-	"internal",
-	"intranet",
-	"extranet",
-	"vpn",
-	"remote",
-	"access",
-	"gateway",
-	"proxy",
-	"cache",
-	"cdn1",
-	"cdn2",
-	"edge",
-	"origin",
-	"origin1",
-	"origin2",
 }
 
 // Common login form field names
@@ -637,6 +252,19 @@ var loginKeywords = []string{
 	"single sign on", "sso", "saml", "ldap",
 }
 
+// Control panel signatures for detection (simplified to most distinctive)
+var controlPanelSignatures = map[string][]string{
+	"cpanel": {"cpanel", "webmail login", "cpsess"},
+	"whm": {"webhost manager", "whm"},
+	"plesk": {"plesk", "login_up.php"},
+	"directadmin": {"directadmin", "cmd_login"},
+	"webmin": {"webmin", "usermin", "virtualmin"},
+	"ispconfig": {"ispconfig"},
+	"cwp": {"centos web panel", "cwp"},
+	"vestacp": {"vesta control panel", "vestacp"},
+	"cyberpanel": {"cyberpanel", "openlitespeed"},
+}
+
 // New creates a new scanner instance
 func New(config ScannerConfig) *Scanner {
 	if config.UserAgent == "" {
@@ -657,7 +285,6 @@ func (s *Scanner) Scan(ctx context.Context) ([]EndpointResult, error) {
 
 	// Extract domain parts
 	host := baseURL.Hostname()
-	port := baseURL.Port()
 	scheme := baseURL.Scheme
 	if scheme == "" {
 		scheme = "https"
@@ -673,44 +300,65 @@ func (s *Scanner) Scan(ctx context.Context) ([]EndpointResult, error) {
 		baseDomain = host
 	}
 
-	// Build host with port if needed
-	buildHost := func(subdomain string) string {
-		if subdomain != "" {
-			hostWithSub := subdomain + "." + baseDomain
-			if port != "" {
-				return hostWithSub + ":" + port
-			}
-			return hostWithSub
-		}
-		if port != "" {
-			return host + ":" + port
-		}
-		return host
-	}
-
 	// Generate all URLs to scan (base domain + subdomains)
 	endpoints := make([]string, 0)
 
-	// First, scan base domain and common subdomains
+	// Domains to scan: base domain + common subdomains
 	domainsToScan := []string{""} // Empty string means base domain
 	domainsToScan = append(domainsToScan, commonSubdomains...)
 
 	for _, subdomain := range domainsToScan {
-		scanHost := buildHost(subdomain)
+		// Build clean hostname without port
+		var cleanHost string
+		if subdomain != "" {
+			cleanHost = subdomain + "." + baseDomain
+		} else {
+			cleanHost = baseDomain
+		}
+		
+		// Standard ports (80/443 based on scheme)
 		scanURL := &url.URL{
 			Scheme: scheme,
-			Host:   scanHost,
+			Host:   cleanHost,
 			Path:   "/",
 		}
 
-		// Generate endpoint URLs for this domain
+		// Add standard endpoint paths
 		for _, endpoint := range commonEndpoints {
 			fullURL := scanURL.ResolveReference(&url.URL{Path: strings.TrimPrefix(endpoint, "/")}).String()
 			endpoints = append(endpoints, fullURL)
 		}
 
-		// Also scan the root of this domain
+		// Add root path
 		endpoints = append(endpoints, scanURL.String())
+		
+		// For base domain and control panel subdomains, also scan control panel ports
+		if subdomain == "" || subdomain == "cpanel" || subdomain == "panel" || subdomain == "admin" {
+			// Scan each control panel with its specific ports
+			for _, ports := range controlPanelPorts {
+				for _, port := range ports {
+					// Determine scheme based on port
+					portScheme := "http"
+					if port == "2083" || port == "2087" || port == "2222" || port == "8443" || port == "8081" || port == "2031" || port == "8083" || port == "10000" {
+						portScheme = "https"
+					}
+					
+					portURL := &url.URL{
+						Scheme: portScheme,
+						Host:   cleanHost + ":" + port,
+						Path:   "/",
+					}
+					endpoints = append(endpoints, portURL.String())
+					
+					// Add important control panel paths for each port
+					cpanelPaths := []string{"login", "cpanel", "whm"}
+					for _, path := range cpanelPaths {
+						pathURL := portURL.ResolveReference(&url.URL{Path: path}).String()
+						endpoints = append(endpoints, pathURL)
+					}
+				}
+			}
+		}
 	}
 
 	// Set total count for progress tracking
@@ -773,6 +421,7 @@ func (s *Scanner) Scan(ctx context.Context) ([]EndpointResult, error) {
 	// Process results - include endpoints that:
 	// 1. Have detected login forms/pages, OR
 	// 2. Return valid status codes (2xx, 3xx) from known login endpoint paths
+	// But exclude SSR 404 pages, error responses, and filter by target languages if specified
 	validResults := make([]EndpointResult, 0)
 	seenURLs := make(map[string]bool) // Avoid duplicates
 
@@ -783,30 +432,42 @@ func (s *Scanner) Scan(ctx context.Context) ([]EndpointResult, error) {
 		}
 		seenURLs[result.URL] = true
 
-		// Include if it has login form/page detection
-		if result.IsLoginPage || result.HasLoginForm {
+		// Skip if this is a 404 page (especially SSR ones that return 200)
+		if result.Is404 {
+			continue
+		}
+
+		// Skip if this is an error response
+		if result.IsError {
+			continue
+		}
+
+		// Apply language filter if specified
+		if len(s.config.TargetLanguages) > 0 {
+			matched := false
+			for _, targetLang := range s.config.TargetLanguages {
+				if strings.EqualFold(result.DetectedLanguage, targetLang) {
+					matched = true
+					break
+				}
+			}
+			if !matched && result.DetectedLanguage != "" {
+				continue
+			}
+		}
+
+		// Use confidence score threshold for better accuracy
+		// Only include results with confidence score >= 30 (configurable threshold)
+		const confidenceThreshold = 30.0
+
+		if result.ConfidenceScore >= confidenceThreshold {
 			validResults = append(validResults, result)
 			continue
 		}
 
-		// Also include if it returns valid status code (2xx, 3xx) and is from a known login path
-		// This catches API endpoints and pages that might not have detectable forms
-		if result.StatusCode >= 200 && result.StatusCode < 400 {
-			// Check if URL path contains common login keywords
-			resultURL, err := url.Parse(result.URL)
-			if err == nil {
-				pathLower := strings.ToLower(resultURL.Path)
-				loginPathKeywords := []string{
-					"login", "signin", "auth", "authenticate", "admin", "administrator",
-					"oauth", "sso", "saml", "portal", "dashboard", "console", "panel",
-				}
-				for _, keyword := range loginPathKeywords {
-					if strings.Contains(pathLower, keyword) {
-						validResults = append(validResults, result)
-						break
-					}
-				}
-			}
+		// Alternative: Include if it has strong indicators (form detection)
+		if result.HasLoginForm && result.StatusCode >= 200 && result.StatusCode < 400 {
+			validResults = append(validResults, result)
 		}
 	}
 
@@ -922,79 +583,605 @@ func (s *Scanner) scanEndpoint(client *http.Client, endpointURL, method string) 
 		result.ResponseBody = string(bodyBytes)
 	}
 
-	// Analyze if this is a login page
-	result.IsLoginPage = s.isLoginPage(result.ResponseBody, result.StatusCode)
-	result.HasLoginForm = s.hasLoginForm(result.ResponseBody)
+	// Detect language/framework
+	result.DetectedLanguage = s.detectLanguage(result.ResponseBody, endpointURL, resp.Header)
+	result.IsSSR = s.isSSRFramework(result.DetectedLanguage, result.ResponseBody)
+	result.Is404 = s.is404Page(result.ResponseBody, result.StatusCode, result.IsSSR)
+
+	// Detect errors and invalid responses
+	result.IsError, result.ErrorType = s.detectError(result.ResponseBody, result.StatusCode, endpointURL)
+
+	// Analyze if this is a login page (only if not an error)
+	if !result.IsError {
+		result.IsLoginPage = s.isLoginPage(result.ResponseBody, result.StatusCode)
+		result.HasLoginForm = s.hasLoginForm(result.ResponseBody)
+	}
+
+	// Calculate confidence score
+	result.ConfidenceScore = s.calculateConfidenceScore(&result)
 
 	return result
 }
 
 // isLoginPage checks if the response indicates a login page
 func (s *Scanner) isLoginPage(body string, statusCode int) bool {
-	bodyLower := strings.ToLower(body)
-
-	// Check status code (2xx or 3xx are usually valid)
-	if statusCode < 200 || statusCode >= 400 {
+	// Only accept 2xx status codes
+	if statusCode < 200 || statusCode >= 300 {
 		return false
 	}
 
-	// Check for login-related keywords
+	bodyLower := strings.ToLower(body)
+
+	// High-value keyword check
+	highValueKeywords := []string{"login", "sign in", "signin", "password", "username"}
 	keywordCount := 0
-	for _, keyword := range loginKeywords {
-		if strings.Contains(bodyLower, strings.ToLower(keyword)) {
+	for _, keyword := range highValueKeywords {
+		if strings.Contains(bodyLower, keyword) {
 			keywordCount++
 		}
 	}
 
-	// If we find at least one login keyword, it's likely a login page
-	// (reduced from 2 to 1 to be less strict)
-	if keywordCount >= 1 {
+	// Fast path: 2+ keywords = login page
+	if keywordCount >= 2 {
 		return true
 	}
 
-	// Check for common login form indicators
-	formIndicators := []string{
-		"<form", "type=\"password\"", "type='password'",
-		"input type=\"password\"", "input type='password'",
-		"login-form", "loginform", "signin-form", "signinform",
+	// Check for control panels (high confidence)
+	for _, signatures := range controlPanelSignatures {
+		for _, signature := range signatures {
+			if strings.Contains(bodyLower, signature) && keywordCount >= 1 {
+				return true
+			}
+		}
 	}
 
-	for _, indicator := range formIndicators {
-		if strings.Contains(bodyLower, indicator) {
-			return true
-		}
+	// Password field + 1 keyword = login page
+	if passwordFieldRegex.MatchString(body) && keywordCount >= 1 {
+		return true
 	}
 
 	return false
 }
 
-// hasLoginForm checks if the response contains a login form
+// hasLoginForm checks if the response contains a login form using regex patterns
 func (s *Scanner) hasLoginForm(body string) bool {
-	bodyLower := strings.ToLower(body)
-
 	// Must have a form element
-	if !strings.Contains(bodyLower, "<form") {
+	if !formTagRegex.MatchString(body) {
 		return false
 	}
 
-	// Must have password field
-	if !strings.Contains(bodyLower, "type=\"password\"") && !strings.Contains(bodyLower, "type='password'") {
+	// Must have password field (using regex for better detection)
+	if !passwordFieldRegex.MatchString(body) {
 		return false
 	}
 
-	// Check for username/email field
-	hasUsernameField := false
-	for _, field := range loginFormFields {
-		if strings.Contains(bodyLower, "name=\""+field+"\"") || strings.Contains(bodyLower, "name='"+field+"'") {
-			hasUsernameField = true
-			break
+	// Must have username/email field (using regex)
+	if !usernameFieldRegex.MatchString(body) {
+		return false
+	}
+
+	return true
+}
+
+// detectControlPanel checks if the response is from a known control panel
+func (s *Scanner) detectControlPanel(body, urlStr string) (bool, string) {
+	bodyLower := strings.ToLower(body)
+	urlLower := strings.ToLower(urlStr)
+
+	// Check each control panel signature
+	for panelName, signatures := range controlPanelSignatures {
+		// Check URL first (fast check)
+		if strings.Contains(urlLower, panelName) {
+			return true, panelName
+		}
+		
+		// Check body signatures
+		for _, signature := range signatures {
+			if strings.Contains(bodyLower, signature) {
+				return true, panelName
+			}
 		}
 	}
 
-	return hasUsernameField
+	// Check for control panel ports
+	for panelName, ports := range controlPanelPorts {
+		for _, port := range ports {
+			if strings.Contains(urlLower, ":"+port) {
+				// Verify it has login indicators
+				if strings.Contains(bodyLower, "login") || strings.Contains(bodyLower, "password") {
+					return true, panelName
+				}
+			}
+		}
+	}
+
+	return false, ""
+}
+
+// calculateConfidenceScore calculates a confidence score (0-100) for login page detection
+func (s *Scanner) calculateConfidenceScore(result *EndpointResult) float64 {
+	score := 0.0
+	bodyLower := strings.ToLower(result.ResponseBody)
+	urlLower := strings.ToLower(result.URL)
+
+	// Check for control panel detection (high value bonus)
+	isControlPanel, panelType := s.detectControlPanel(result.ResponseBody, result.URL)
+	if isControlPanel {
+		score += 30.0 // Strong bonus for control panels
+		if panelType != "" {
+			score += 5.0 // Extra for specific panel
+		}
+	}
+
+	// URL-based scoring (max 25 points)
+	if strings.Contains(urlLower, "/login") || strings.Contains(urlLower, "/signin") {
+		score += 15.0
+	} else if strings.Contains(urlLower, "/auth") || strings.Contains(urlLower, "cpanel") || strings.Contains(urlLower, "admin") {
+		score += 10.0
+	}
+
+	// Check for control panel ports (bonus)
+	for _, ports := range controlPanelPorts {
+		for _, port := range ports {
+			if strings.Contains(urlLower, ":"+port) {
+				score += 10.0
+				goto portFound // Exit nested loops
+			}
+		}
+	}
+portFound:
+
+	// File extension bonus
+	if strings.HasSuffix(urlLower, ".php") || strings.HasSuffix(urlLower, ".jsp") || 
+	   strings.HasSuffix(urlLower, ".aspx") || strings.HasSuffix(urlLower, ".cgi") {
+		score += 5.0
+	}
+
+	// Form detection (max 40 points)
+	if result.HasLoginForm {
+		score += 40.0
+	} else if passwordFieldRegex.MatchString(result.ResponseBody) {
+		score += 20.0 // Has password field but not complete form
+	}
+
+	// Content-based scoring (max 30 points)
+	keywordCount := 0
+	highValueKeywords := []string{"login", "sign in", "signin", "password", "username", "email"}
+	for _, keyword := range highValueKeywords {
+		if strings.Contains(bodyLower, keyword) {
+			keywordCount++
+		}
+	}
+	score += float64(keywordCount) * 3.0 // Up to 18 points for keywords
+
+	if loginButtonRegex.MatchString(result.ResponseBody) {
+		score += 12.0
+	}
+
+	// Status code adjustment
+	if result.StatusCode >= 200 && result.StatusCode < 300 {
+		score += 0.0 // No penalty for 2xx
+	} else if result.StatusCode >= 300 && result.StatusCode < 400 {
+		score -= 10.0 // Penalty for redirects
+	}
+
+	// Penalties for error indicators
+	if result.IsError {
+		score -= 50.0
+	}
+	if result.Is404 {
+		score -= 50.0
+	}
+
+	// Ensure score is within 0-100 range
+	if score < 0 {
+		score = 0
+	}
+	if score > 100 {
+		score = 100
+	}
+
+	return score
 }
 
 // GetStats returns scanning statistics
 func (s *Scanner) GetStats() (discovered, validated int) {
 	return int(atomic.LoadInt32(&s.discovered)), int(atomic.LoadInt32(&s.validated))
+}
+
+// detectLanguage detects the language/framework from URL, headers, and response body
+func (s *Scanner) detectLanguage(body, urlStr string, headers http.Header) string {
+	bodyLower := strings.ToLower(body)
+	urlLower := strings.ToLower(urlStr)
+	
+	// Check URL extension first
+	if strings.Contains(urlLower, ".php") {
+		return "php"
+	}
+	if strings.Contains(urlLower, ".jsp") || strings.Contains(urlLower, ".do") || strings.Contains(urlLower, ".action") {
+		return "java"
+	}
+	if strings.Contains(urlLower, ".aspx") || strings.Contains(urlLower, ".asp") {
+		return "dotnet"
+	}
+	if strings.Contains(urlLower, ".py") {
+		return "python"
+	}
+	
+	// Check HTTP headers
+	server := strings.ToLower(headers.Get("Server"))
+	xPoweredBy := strings.ToLower(headers.Get("X-Powered-By"))
+	
+	if strings.Contains(xPoweredBy, "php") || strings.Contains(server, "php") {
+		return "php"
+	}
+	if strings.Contains(xPoweredBy, "asp.net") || strings.Contains(server, "microsoft-iis") {
+		return "dotnet"
+	}
+	if strings.Contains(server, "apache tomcat") || strings.Contains(server, "jboss") || strings.Contains(server, "weblogic") {
+		return "java"
+	}
+	
+	// Check response body for framework signatures
+	// Next.js / React
+	if strings.Contains(bodyLower, "__next") || strings.Contains(bodyLower, "_next/static") {
+		return "nextjs"
+	}
+	if strings.Contains(bodyLower, "react") && (strings.Contains(bodyLower, "reactdom") || strings.Contains(bodyLower, "react-dom")) {
+		return "react"
+	}
+	
+	// Vue.js
+	if strings.Contains(bodyLower, "vue.js") || strings.Contains(bodyLower, "vuejs") || strings.Contains(bodyLower, "data-v-") {
+		return "vue"
+	}
+	
+	// Nuxt.js
+	if strings.Contains(bodyLower, "__nuxt") || strings.Contains(bodyLower, "_nuxt/") {
+		return "nuxtjs"
+	}
+	
+	// Angular
+	if strings.Contains(bodyLower, "ng-version") || strings.Contains(bodyLower, "angular") {
+		return "angular"
+	}
+	
+	// Node.js/Express indicators
+	if strings.Contains(xPoweredBy, "express") {
+		return "node"
+	}
+	
+	// WordPress
+	if strings.Contains(bodyLower, "wp-content") || strings.Contains(bodyLower, "wp-includes") {
+		return "php"
+	}
+	
+	// Laravel
+	if strings.Contains(bodyLower, "laravel") || strings.Contains(bodyLower, "csrf-token") {
+		return "php"
+	}
+	
+	// Django
+	if strings.Contains(bodyLower, "csrfmiddlewaretoken") || strings.Contains(bodyLower, "django") {
+		return "python"
+	}
+	
+	// Flask
+	if strings.Contains(bodyLower, "flask") {
+		return "python"
+	}
+	
+	// Ruby on Rails
+	if strings.Contains(bodyLower, "csrf-param") && strings.Contains(bodyLower, "csrf-token") {
+		return "ruby"
+	}
+	
+	// Spring Boot
+	if strings.Contains(bodyLower, "spring") || strings.Contains(bodyLower, "whitelabel error page") {
+		return "java"
+	}
+	
+	return "unknown"
+}
+
+// isSSRFramework checks if the detected language is a server-side rendering framework
+func (s *Scanner) isSSRFramework(language, body string) bool {
+	ssrFrameworks := []string{"nextjs", "nuxtjs", "angular"}
+	for _, framework := range ssrFrameworks {
+		if strings.EqualFold(language, framework) {
+			return true
+		}
+	}
+	
+	// Additional check for SSR indicators in body
+	bodyLower := strings.ToLower(body)
+	if strings.Contains(bodyLower, "server-side") || strings.Contains(bodyLower, "ssr") {
+		return true
+	}
+	
+	return false
+}
+
+// is404Page detects if a page is actually a 404 even if it returns 200 OK (common in SSR apps)
+func (s *Scanner) is404Page(body string, statusCode int, isSSR bool) bool {
+	// If status code is already 404, it's definitely a 404
+	if statusCode == 404 {
+		return true
+	}
+	
+	// For SSR frameworks, check content for 404 indicators
+	if isSSR || statusCode == 200 {
+		bodyLower := strings.ToLower(body)
+		
+		// Common 404 page indicators
+		fourZeroFourIndicators := []string{
+			"404",
+			"not found",
+			"page not found",
+			"page could not be found",
+			"this page could not be found",
+			"the page you are looking for",
+			"the requested url was not found",
+			"error 404",
+			"http 404",
+			"404 error",
+			"does not exist",
+			"could not be found",
+			"page doesn't exist",
+			"page does not exist",
+		}
+		
+		// Count how many indicators we find
+		indicatorCount := 0
+		for _, indicator := range fourZeroFourIndicators {
+			if strings.Contains(bodyLower, indicator) {
+				indicatorCount++
+			}
+		}
+		
+		// If we find 2 or more indicators, it's likely a 404 page
+		if indicatorCount >= 2 {
+			return true
+		}
+		
+		// Check for specific Next.js 404 page
+		if strings.Contains(bodyLower, "this page could not be found") {
+			return true
+		}
+		
+		// Check for title containing 404
+		if strings.Contains(bodyLower, "<title>") && strings.Contains(bodyLower, "404") {
+			// Make sure "404" appears near the title tag
+			titleStart := strings.Index(bodyLower, "<title>")
+			if titleStart >= 0 {
+				titleEnd := strings.Index(bodyLower[titleStart:], "</title>")
+				if titleEnd > 0 && titleEnd < 100 { // Title should be reasonably short
+					titleContent := bodyLower[titleStart : titleStart+titleEnd]
+					if strings.Contains(titleContent, "404") {
+						return true
+					}
+				}
+			}
+		}
+	}
+	
+	return false
+}
+
+// detectError detects if an endpoint returned an error response
+func (s *Scanner) detectError(body string, statusCode int, urlStr string) (bool, string) {
+	bodyLower := strings.ToLower(body)
+	
+	// Check HTTP status codes for obvious errors
+	if statusCode == 400 {
+		return true, "400"
+	}
+	if statusCode == 401 {
+		return true, "401"
+	}
+	if statusCode == 403 {
+		return true, "403"
+	}
+	if statusCode == 404 {
+		return true, "404"
+	}
+	if statusCode >= 500 && statusCode < 600 {
+		return true, "500"
+	}
+	
+	// Check for generic error pages
+	errorIndicators := []string{
+		"error",
+		"exception",
+		"not found",
+		"access denied",
+		"forbidden",
+		"unauthorized",
+		"bad request",
+		"internal server error",
+		"service unavailable",
+		"gateway timeout",
+	}
+	
+	// Check for framework-specific error pages
+	frameworkErrors := map[string][]string{
+		"nextjs": {
+			"application error",
+			"this page could not be found",
+			"404 | this page could not be found",
+		},
+		"nuxtjs": {
+			"an error occurred",
+			"page not found",
+			"this page could not be found",
+		},
+		"angular": {
+			"error",
+			"page not found",
+		},
+		"laravel": {
+			"whoops",
+			"something went wrong",
+			"404 | not found",
+			"403 | forbidden",
+			"419 | page expired",
+			"500 | server error",
+			"503 | service unavailable",
+		},
+		"django": {
+			"page not found",
+			"server error",
+			"404 not found",
+			"500 internal server error",
+		},
+		"flask": {
+			"404 not found",
+			"internal server error",
+			"method not allowed",
+		},
+		"spring": {
+			"whitelabel error page",
+			"there was an unexpected error",
+			"http status",
+		},
+		"rails": {
+			"we're sorry, but something went wrong",
+			"the page you were looking for doesn't exist",
+			"routing error",
+		},
+		"express": {
+			"cannot get",
+			"cannot post",
+			"not found",
+		},
+	}
+	
+	// Check for framework-specific errors
+	for _, errors := range frameworkErrors {
+		for _, errPattern := range errors {
+			if strings.Contains(bodyLower, errPattern) {
+				return true, "invalid"
+			}
+		}
+	}
+	
+	// Count generic error indicators
+	errorCount := 0
+	for _, indicator := range errorIndicators {
+		if strings.Contains(bodyLower, indicator) {
+			errorCount++
+		}
+	}
+	
+	// If body has multiple error indicators and no login indicators, it's likely an error page
+	if errorCount >= 2 {
+		// Double check it's not a login page with error message (like "invalid username")
+		hasLoginIndicators := false
+		for _, keyword := range loginKeywords {
+			if strings.Contains(bodyLower, strings.ToLower(keyword)) {
+				hasLoginIndicators = true
+				break
+			}
+		}
+		
+		if !hasLoginIndicators {
+			return true, "error"
+		}
+	}
+	
+	// Check for empty or minimal responses (might indicate invalid endpoint)
+	if len(strings.TrimSpace(body)) < 50 && statusCode == 200 {
+		// Very short response with 200 status - might be invalid
+		// Unless it's an API endpoint that returns JSON
+		if !strings.Contains(bodyLower, "{") && !strings.Contains(bodyLower, "[") {
+			return true, "empty"
+		}
+	}
+	
+	// Check for redirect loops or infinite redirects
+	if strings.Contains(bodyLower, "redirect") && strings.Contains(bodyLower, "too many") {
+		return true, "redirect"
+	}
+	
+	// Check for maintenance pages
+	maintenanceIndicators := []string{
+		"under maintenance",
+		"maintenance mode",
+		"temporarily unavailable",
+		"be back soon",
+		"coming soon",
+	}
+	
+	for _, indicator := range maintenanceIndicators {
+		if strings.Contains(bodyLower, indicator) {
+			return true, "maintenance"
+		}
+	}
+	
+	// Check for blocked/banned indicators
+	blockedIndicators := []string{
+		"blocked",
+		"banned",
+		"access denied",
+		"rate limit",
+		"too many requests",
+		"captcha",
+	}
+	
+	blockCount := 0
+	for _, indicator := range blockedIndicators {
+		if strings.Contains(bodyLower, indicator) {
+			blockCount++
+		}
+	}
+	
+	if blockCount >= 2 {
+		return true, "blocked"
+	}
+	
+	// Check for default server pages (Apache, Nginx, IIS)
+	defaultPages := []string{
+		"apache2 ubuntu default page",
+		"welcome to nginx",
+		"iis windows server",
+		"it works!",
+		"test page",
+		"default web site page",
+	}
+	
+	for _, defaultPage := range defaultPages {
+		if strings.Contains(bodyLower, defaultPage) {
+			return true, "default"
+		}
+	}
+	
+	// Check title tag for error indicators
+	if strings.Contains(bodyLower, "<title>") {
+		titleStart := strings.Index(bodyLower, "<title>")
+		if titleStart >= 0 {
+			titleEnd := strings.Index(bodyLower[titleStart:], "</title>")
+			if titleEnd > 0 && titleEnd < 200 {
+				titleContent := bodyLower[titleStart : titleStart+titleEnd]
+				
+				// Check for error status codes in title
+				errorCodes := []string{"400", "401", "403", "404", "500", "502", "503"}
+				for _, code := range errorCodes {
+					if strings.Contains(titleContent, code) {
+						return true, code
+					}
+				}
+				
+				// Check for error words in title
+				if strings.Contains(titleContent, "error") || 
+				   strings.Contains(titleContent, "not found") ||
+				   strings.Contains(titleContent, "forbidden") ||
+				   strings.Contains(titleContent, "denied") {
+					return true, "error"
+				}
+			}
+		}
+	}
+	
+	// No error detected
+	return false, ""
 }
