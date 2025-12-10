@@ -11,25 +11,26 @@ import (
 	"time"
 
 	"github.com/letgo/cracker"
+	"github.com/letgo/ddos"
 )
 
 // CurlConfig represents parsed cURL command configuration
 type CurlConfig struct {
-	URL           string
-	Method        string
-	Headers       map[string]string
-	Data          string
-	ContentType   string
+	URL             string
+	Method          string
+	Headers         map[string]string
+	Data            string
+	ContentType     string
 	FollowRedirects bool
-	Timeout       time.Duration
+	Timeout         time.Duration
 }
 
 // ParseCurlCommand parses a bash cURL command and extracts relevant information
 func ParseCurlCommand(curlCmd string) (*CurlConfig, error) {
 	config := &CurlConfig{
-		Method:        "GET",
-		Headers:       make(map[string]string),
-		Timeout:       10 * time.Second,
+		Method:          "GET",
+		Headers:         make(map[string]string),
+		Timeout:         10 * time.Second,
 		FollowRedirects: false,
 	}
 
@@ -62,7 +63,7 @@ func ParseCurlCommand(curlCmd string) (*CurlConfig, error) {
 					key := strings.TrimSpace(parts[0])
 					value := strings.TrimSpace(parts[1])
 					config.Headers[key] = value
-					
+
 					// Track Content-Type
 					if strings.ToLower(key) == "content-type" {
 						config.ContentType = value
@@ -196,11 +197,11 @@ func ExtractFieldsFromData(data string, contentType string) (usernameField, pass
 // parseJSONFields extracts field names from JSON data
 func parseJSONFields(data string) map[string]string {
 	fields := make(map[string]string)
-	
+
 	// Simple JSON parsing - find "key": "value" patterns
 	re := regexp.MustCompile(`"([^"]+)"\s*:\s*"[^"]*"`)
 	matches := re.FindAllStringSubmatch(data, -1)
-	
+
 	for _, match := range matches {
 		if len(match) > 1 {
 			fields[match[1]] = ""
@@ -213,7 +214,7 @@ func parseJSONFields(data string) map[string]string {
 // parseFormFields extracts field names from form-urlencoded data
 func parseFormFields(data string) map[string]string {
 	fields := make(map[string]string)
-	
+
 	pairs := strings.Split(data, "&")
 	for _, pair := range pairs {
 		kv := strings.SplitN(pair, "=", 2)
@@ -290,7 +291,7 @@ func LoadFromFile(filename string) ([]*CurlConfig, error) {
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		
+
 		// Skip empty lines and comments
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
@@ -331,4 +332,56 @@ func LoadFromFile(filename string) ([]*CurlConfig, error) {
 	}
 
 	return configs, nil
+}
+
+// ToDDoSConfig converts CurlConfig to ddos.DDoSConfig
+func (cc *CurlConfig) ToDDoSConfig() (*ddos.DDoSConfig, error) {
+	if cc.URL == "" {
+		return nil, fmt.Errorf("URL is required")
+	}
+
+	config := &ddos.DDoSConfig{
+		TargetURL:        cc.URL,
+		Method:           cc.Method,
+		Headers:          cc.Headers,
+		Body:             cc.Data,
+		ContentType:      cc.ContentType,
+		FollowRedirects:  cc.FollowRedirects,
+		Timeout:          cc.Timeout,
+		MaxThreads:       100,              // Default threads
+		Duration:         60 * time.Second, // Default duration
+		AttackMode:       ddos.ModeFlood,   // Default mode
+		ReuseConnections: true,             // Better performance
+		SlowlorisDelay:   10 * time.Second, // Default slowloris delay
+	}
+
+	// Use shorter timeout for DDoS (faster failures)
+	if config.Timeout > 5*time.Second {
+		config.Timeout = 5 * time.Second
+	}
+
+	return config, nil
+}
+
+// LoadDDoSFromFile reads cURL commands from a file and returns DDoS configurations
+func LoadDDoSFromFile(filename string) ([]*ddos.DDoSConfig, error) {
+	curlConfigs, err := LoadFromFile(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	var ddosConfigs []*ddos.DDoSConfig
+	for _, curlConfig := range curlConfigs {
+		ddosConfig, err := curlConfig.ToDDoSConfig()
+		if err != nil {
+			continue // Skip invalid configs
+		}
+		ddosConfigs = append(ddosConfigs, ddosConfig)
+	}
+
+	if len(ddosConfigs) == 0 {
+		return nil, fmt.Errorf("no valid DDoS configurations found in file")
+	}
+
+	return ddosConfigs, nil
 }

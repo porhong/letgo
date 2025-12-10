@@ -15,15 +15,26 @@ A powerful, multi-threaded password cracking tool with support for HTTP/HTTPS lo
 ## Quick Start
 
 ```bash
-# Build
+# Build executable
 go build -o letgo cmd/letgo/main.go
 
-# Run
+# Run the executable
 ./letgo
-# or
+
+# Or run directly without building
 go run cmd/letgo/main.go
-# linux build
-$env:GOOS="linux"; $env:GOARCH="amd64"; go build -o letgo
+```
+
+**Build for Linux:**
+```bash
+# On Linux/Mac (Bash)
+GOOS=linux GOARCH=amd64 go build -o letgo cmd/letgo/main.go
+```
+
+**Build for Linux on Windows:**
+```powershell
+# On Windows (PowerShell)
+$env:GOOS="linux"; $env:GOARCH="amd64"; go build -o letgo cmd/letgo/main.go
 ```
 
 ## Usage
@@ -47,7 +58,7 @@ Attack with multiple usernames:
 ### 3. cURL Config Attack
 
 Import configuration from cURL commands:
-- Create `cURL.txt` with your cURL commands
+- Create `cURL-Bruteforce.txt` with your cURL commands
 - Choose option `5` from menu
 - Tool automatically extracts headers, endpoints, and field names
 
@@ -63,7 +74,7 @@ Discover login endpoints:
 
 - `users.txt` - List of usernames (one per line)
 - `passwords.txt` - List of passwords (one per line)
-- `cURL.txt` - cURL commands for attack configuration
+- `cURL-Bruteforce.txt` - cURL commands for attack configuration
 - `valid-url.txt` - Valid login endpoints (from scanning)
 - `results.txt` - Successful credentials (format: `URL|username|password`)
 
@@ -144,7 +155,7 @@ Configure how to detect successful login:
 - **Success keywords**: Text in response (e.g., `welcome,dashboard`)
 - **Failure keywords**: Text indicating failure (e.g., `invalid,incorrect`)
 
-### cURL.txt Format
+### cURL-Bruteforce.txt Format
 
 ```bash
 # Example 1: JSON POST
@@ -160,7 +171,17 @@ curl -X POST https://example.com/login \
 ## Building from Source
 
 ```bash
+# Build for current platform
 go build -o letgo cmd/letgo/main.go
+
+# Build for Linux (amd64)
+GOOS=linux GOARCH=amd64 go build -o letgo cmd/letgo/main.go
+
+# Build for Windows
+GOOS=windows GOARCH=amd64 go build -o letgo.exe cmd/letgo/main.go
+
+# Build for macOS
+GOOS=darwin GOARCH=amd64 go build -o letgo cmd/letgo/main.go
 ```
 
 ## License
