@@ -1,0 +1,19 @@
+curl 'https://staffportal.airportthai.co.th/fo/account/login' \
+  -H 'accept: application/json, text/javascript, */*; q=0.01' \
+  -H 'accept-language: en-US,en;q=0.9' \
+  -H 'cache-control: no-cache' \
+  -H 'content-type: application/x-www-form-urlencoded; charset=UTF-8' \
+  -b 'th-aot-staffportal-consent=1' \
+  -H 'origin: https://staffportal.airportthai.co.th' \
+  -H 'pragma: no-cache' \
+  -H 'priority: u=1, i' \
+  -H 'referer: https://staffportal.airportthai.co.th/fo/account/login' \
+  -H 'sec-ch-ua: "Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"' \
+  -H 'sec-ch-ua-mobile: ?0' \
+  -H 'sec-ch-ua-platform: "Windows"' \
+  -H 'sec-fetch-dest: empty' \
+  -H 'sec-fetch-mode: cors' \
+  -H 'sec-fetch-site: same-origin' \
+  -H 'user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36' \
+  -H 'x-requested-with: XMLHttpRequest' \
+  --data-raw 'userName=admin&password=23213232&returnUrl='

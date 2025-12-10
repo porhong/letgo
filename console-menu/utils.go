@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/letgo/proxy"
 	"github.com/letgo/scanner"
 	"github.com/letgo/secretscanner"
 )
@@ -129,4 +130,37 @@ func getTechnologyRecommendations(tech string) string {
 		return rec
 	}
 	return "No specific recommendations available"
+}
+
+// writeProxiesToFile writes proxies to a file (thread-safe)
+func (m *Menu) writeProxiesToFile(proxies []proxy.ProxyResult, filename string) error {
+	m.resultMutex.Lock()
+	defer m.resultMutex.Unlock()
+
+	file, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("failed to create file: %w", err)
+	}
+	defer file.Close()
+
+	writer := bufio.NewWriter(file)
+	defer writer.Flush()
+
+	// Write header
+	header := fmt.Sprintf("# Proxy List - Total: %d\n", len(proxies))
+	header += "# Format: protocol://host:port\n"
+	header += fmt.Sprintf("# Generated: %s\n\n", strings.TrimSpace(strings.Split(fmt.Sprintf("%v", os.Stdout), " ")[0]))
+	if _, err := writer.WriteString(header); err != nil {
+		return fmt.Errorf("failed to write header: %w", err)
+	}
+
+	// Write each proxy
+	for _, proxy := range proxies {
+		proxyLine := proxy.FormatProxy() + "\n"
+		if _, err := writer.WriteString(proxyLine); err != nil {
+			return fmt.Errorf("failed to write proxy: %w", err)
+		}
+	}
+
+	return nil
 }

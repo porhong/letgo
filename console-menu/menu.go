@@ -35,8 +35,11 @@ func (m *Menu) Display() {
 	fmt.Println("[Attack]")
 	fmt.Println("  5) Attack Brute force with cURL")
 	fmt.Println("  6) DDoS Attack (cURL)")
-	fmt.Println("  7) Exit")
-	fmt.Print("Choose an option [1-7]: ")
+	fmt.Println("[Proxy]")
+	fmt.Println("  7) Scrape Proxies")
+	fmt.Println("  8) Validate Proxies")
+	fmt.Println("  9) Exit")
+	fmt.Print("Choose an option [1-9]: ")
 }
 
 // Process handles the user's menu choice
@@ -59,6 +62,10 @@ func (m *Menu) Process() bool {
 	case "6":
 		m.ddosAttack()
 	case "7":
+		m.scrapeProxies()
+	case "8":
+		m.validateProxies()
+	case "9":
 		fmt.Println("Exiting...")
 		return false
 	default:
